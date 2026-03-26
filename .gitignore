@@ -1,0 +1,64 @@
+# Node
+node_modules/
+
+# Env
+.env
+.env.local
+*.env
+!.env.sample
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Foundry (EVM)
+# Build artifacts and cache
+/evm/out/
+/evm/cache/
+/evm/broadcast/
+/evm/coverage/
+
+# Gas snapshots: keep named snapshot file if you use it
+!/evm/gas-snapshot
+
+# TypeScript build outputs (if any)
+/evm/dist/
+
+# Solana/Anchor
+/.anchor/
+/target/
+**/target/
+**/.anchor/
+test-ledger/
+.cache/
+
+# Anchor program deploy keys and IDL cache
+**/target/deploy/*.json
+**/target/idl/*.json
+!**/target/idl/daily_lottery.json
+
+# Explicitly track program keypairs for CI determinism if you choose to use them
+!programs/daily_lottery/keypair.json
+
+# Per-env Solana keypairs (do not commit real keys)
+**/keypairs
+
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.anchor/localnet.log
+
+# Coverage (JS tooling if added later)
+coverage/
+
+# Lockfiles (optional to ignore; uncomment if desired)
+# pnpm-lock.yaml
+# yarn.lock
+# package-lock.json
