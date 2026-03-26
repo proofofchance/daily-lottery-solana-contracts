@@ -14,7 +14,7 @@ debug = 0
 overflow-checks = true
 
 [patch.crates-io]
-base64ct = { path = "../vendor/base64ct-1.8.3" }
-blake3 = { path = "../vendor/blake3-1.8.3" }
-constant_time_eq = { path = "../vendor/constant_time_eq-0.4.2" }
-solana-keypair = { path = "../vendor/solana-keypair-3.1.2" }
+base64ct = { path = "vendor/base64ct-1.8.3" }
+blake3 = { path = "vendor/blake3-1.8.3" }
+constant_time_eq = { path = "vendor/constant_time_eq-0.4.2" }
+solana-keypair = { path = "vendor/solana-keypair-3.1.2" }
