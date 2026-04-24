@@ -218,6 +218,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         created_at_unix: current_time,
         buy_start_unix: lottery.buy_start_unix,
         buy_deadline_unix: lottery.buy_deadline_unix,
+        upload_start_unix: lottery.upload_start_unix,
+        upload_deadline_unix: lottery.upload_deadline_unix,
     };
     event.emit();
 
