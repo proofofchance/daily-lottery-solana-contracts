@@ -24,6 +24,9 @@ ones are:
 Notes:
 
 - Upload and attestation refer to the same participant phase.
+- `LotteryCreated` emits both buy and upload window timestamps. Keep these
+  fields in sync with the account defaults in `Lottery::calculate_windows` so
+  indexers can reconstruct the phase without fetching the account.
 - Reveal and payout scripts depend on the Ark PG backend when used through the
   root workflow.
 - The reveal and payout walkthrough remains in
