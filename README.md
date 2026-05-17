@@ -24,9 +24,11 @@ ones are:
 Notes:
 
 - Upload and attestation refer to the same participant phase.
-- `LotteryCreated` emits both buy and upload window timestamps. Keep these
-  fields in sync with the account defaults in `Lottery::calculate_windows` so
-  indexers can reconstruct the phase without fetching the account.
+- Multiple lotteries may be active concurrently; operational commands should target
+  an explicit lottery ID when settling or paying winners.
+- Single-participant lotteries auto-complete upload when the upload/attestation
+  phase opens and can settle immediately through refund semantics. Multi-participant
+  no-attester or zero-reveal refunds remain gated on the upload deadline.
 - Reveal and payout scripts depend on the Ark PG backend when used through the
   root workflow.
 - The reveal and payout walkthrough remains in

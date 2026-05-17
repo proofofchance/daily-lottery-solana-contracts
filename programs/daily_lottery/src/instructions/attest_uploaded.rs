@@ -24,8 +24,7 @@ use solana_program::{
 };
 
 const ATTESTATION_MESSAGE_DOMAIN_V2: &[u8] = &[
-    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x41, 0x54, 0x54, 0x45, 0x53, 0x54, 0x5f, 0x56,
-    0x32,
+    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x41, 0x54, 0x54, 0x45, 0x53, 0x54, 0x5f, 0x56, 0x32,
 ];
 
 /// Process the AttestUploaded instruction
@@ -127,17 +126,17 @@ pub fn process(
         return Err(Error::OutsideTimeWindow.into());
     }
 
-    // Validate vote range. Max winners <= participants_count - 1, min 1.
+    // Validate vote range. Multi-participant rounds cap winners at
+    // participants_count - 1. A single-participant round can only vote 1.
     if voted_number_of_winners == 0 {
         return Err(Error::InvalidInstruction.into());
     }
-    if lottery.participants_count <= 1 {
-        // In single-participant scenarios, only a vote of 1 is meaningful.
-        if voted_number_of_winners != 1 {
-            return Err(Error::InvalidInstruction.into());
-        }
-    }
-    if voted_number_of_winners > lottery.participants_count.saturating_sub(1) {
+    let max_winners = if lottery.participants_count <= 1 {
+        1
+    } else {
+        lottery.participants_count.saturating_sub(1)
+    };
+    if voted_number_of_winners > max_winners {
         return Err(Error::InvalidInstruction.into());
     }
 

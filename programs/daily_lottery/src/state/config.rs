@@ -7,8 +7,7 @@
 //! - Authority management for lottery operations
 //! - Ticket pricing configuration (immutable after init)
 //! - Service charge settings (updatable by authority)
-//! - Active lottery tracking for single-lottery constraint
-//! - Lottery counter for unique ID generation
+//! - Lottery counter for unique ID generation across concurrent lotteries
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::pubkey::Pubkey;

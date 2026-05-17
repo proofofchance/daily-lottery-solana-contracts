@@ -11,7 +11,7 @@ use crate::{
     utils::{
         account::{read_account_data, write_account_data},
         pda::assert_pda_owned,
-        validation::{compute_service_fee, require_key_match, require_writable},
+        validation::{compute_service_fee, require_key_match, require_signer, require_writable},
     },
 };
 use solana_program::{
@@ -31,7 +31,7 @@ use solana_program::{
 /// 0. `[]` Config account
 /// 1. `[writable]` Lottery account
 /// 2. `[writable]` Vault account
-/// 3. `[writable]` Authority wallet (refund recipient)
+/// 3. `[writable, signer]` Authority wallet (refund recipient)
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
 
@@ -46,6 +46,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     require_writable(lottery_ai)?;
     require_writable(vault_ai)?;
     require_writable(authority_ai)?;
+    require_signer(authority_ai)?;
 
     // Read account data
     let config: Config = read_account_data(config_ai)?;
@@ -77,9 +78,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         return Err(Error::LotteryAlreadySettled.into());
     }
 
-    // Check if upload (attestation) deadline has passed
+    // Check if upload (attestation) deadline has passed. Single-participant
+    // lotteries are marked upload-complete by BeginUploadPhase and can settle
+    // immediately through refund semantics.
     let clock = solana_program::clock::Clock::get()?;
-    if lottery.upload_deadline_unix == 0 || clock.unix_timestamp < lottery.upload_deadline_unix {
+    let single_participant_ready = lottery.participants_count == 1 && lottery.uploads_complete;
+    let upload_deadline_elapsed =
+        lottery.upload_deadline_unix > 0 && clock.unix_timestamp >= lottery.upload_deadline_unix;
+    if !single_participant_ready && !upload_deadline_elapsed {
         return Err(Error::InvalidInstruction.into());
     }
 
