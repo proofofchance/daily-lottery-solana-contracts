@@ -18,8 +18,7 @@ fn read_after_disc<T: BorshDeserialize>(data: &[u8]) -> T {
 }
 
 const ATTESTATION_MESSAGE_DOMAIN_V2: &[u8] = &[
-    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x41, 0x54, 0x54, 0x45, 0x53, 0x54, 0x5f, 0x56,
-    0x32,
+    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x41, 0x54, 0x54, 0x45, 0x53, 0x54, 0x5f, 0x56, 0x32,
 ];
 
 fn participant_pda(program_id: &Pubkey, lottery_pda: &Pubkey, wallet: &Pubkey) -> Pubkey {
@@ -160,11 +159,8 @@ fn attest_uploaded(
 
     let signature = authority.sign_message(&message);
     let authority_pubkey = authority.pubkey().to_bytes();
-    let ed25519_ix = new_ed25519_instruction_with_signature(
-        &message,
-        signature.as_array(),
-        &authority_pubkey,
-    );
+    let ed25519_ix =
+        new_ed25519_instruction_with_signature(&message, signature.as_array(), &authority_pubkey);
     let attest_ix = SdkIx {
         program_id,
         accounts: vec![
@@ -379,6 +375,108 @@ fn finalize_winners_no_attesters_is_rejected() {
 }
 
 #[test]
+fn single_participant_attestation_accepts_vote_of_one() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer]);
+
+    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+    let secret = b"single-attest";
+    let proof_hash = hash(secret).to_bytes();
+    let participant_pda = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer,
+        secret,
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+
+    attest_uploaded(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_pda,
+        &buyer,
+        &authority,
+        proof_hash,
+        1,
+    );
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert_eq!(lot.attested_count, 1);
+    let participant_account = ctx.get_account(participant_pda).unwrap();
+    let participant: Participant = read_after_disc(&participant_account.data);
+    assert!(participant.attested_uploaded);
+    assert_eq!(participant.voted_number_of_winners, 1);
+}
+
+#[test]
+fn single_participant_refund_can_settle_before_upload_deadline() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer]);
+
+    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+
+    buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer,
+        b"single-refund",
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert!(lot.uploads_complete);
+    assert!(ctx.get_clock().unix_timestamp < lot.upload_deadline_unix);
+
+    let finalize_no_attesters_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(authority.pubkey(), true),
+        ],
+        data: borsh::to_vec(&Instruction::FinalizeNoAttesters).unwrap(),
+    };
+    send_tx(&mut ctx, vec![finalize_no_attesters_ix], &[&authority]).unwrap();
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert!(lot.settled);
+    assert_eq!(lot.winners_count, 0);
+}
+
+#[test]
 fn finalize_no_attesters_refund_path_still_works() {
     let program_id = Pubkey::new_unique();
     let authority = Keypair::new();
@@ -428,11 +526,11 @@ fn finalize_no_attesters_refund_path_still_works() {
             AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(lottery_pda, false),
             AccountMeta::new(vault_pda, false),
-            AccountMeta::new(authority.pubkey(), false),
+            AccountMeta::new(authority.pubkey(), true),
         ],
         data: borsh::to_vec(&Instruction::FinalizeNoAttesters).unwrap(),
     };
-    send_tx(&mut ctx, vec![finalize_no_attesters_ix], &[]).unwrap();
+    send_tx(&mut ctx, vec![finalize_no_attesters_ix], &[&authority]).unwrap();
 
     let lot = load_lottery(&mut ctx, lottery_pda);
     assert!(lot.settled);
