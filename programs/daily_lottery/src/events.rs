@@ -116,6 +116,27 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
+    /// Emitted when the provider omitted one or more accepted/attested reveals
+    /// and anyone may submit the missing signed reveals before settlement.
+    RevealRemediationBegan {
+        lottery_id: u64,
+        lottery: String,
+        included_reveals_count: u64,
+        attested_count: u64,
+        remediation_start_unix: i64,
+        remediation_deadline_unix: i64,
+        timestamp: i64,
+    },
+
+    /// Emitted when remediation finishes because all attested reveals have been included.
+    RevealRemediationCompleted {
+        lottery_id: u64,
+        lottery: String,
+        included_reveals_count: u64,
+        attested_count: u64,
+        timestamp: i64,
+    },
+
     /// Emitted when reveal window is adjusted
     RevealWindowAdjusted {
         lottery_id: u64,
@@ -310,6 +331,8 @@ impl LotteryEvent {
             LotteryEvent::BuyPhaseBegan { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::AttestationSubmitted { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RevealsUploaded { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::RevealRemediationBegan { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::RevealRemediationCompleted { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RevealWindowAdjusted { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::UploadPhaseBegan { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::SettlementPhaseBegan { lottery_id, .. } => Some(*lottery_id),
@@ -341,6 +364,8 @@ impl LotteryEvent {
             LotteryEvent::BuyPhaseBegan { timestamp, .. } => *timestamp,
             LotteryEvent::AttestationSubmitted { timestamp, .. } => *timestamp,
             LotteryEvent::RevealsUploaded { timestamp, .. } => *timestamp,
+            LotteryEvent::RevealRemediationBegan { timestamp, .. } => *timestamp,
+            LotteryEvent::RevealRemediationCompleted { timestamp, .. } => *timestamp,
             LotteryEvent::RevealWindowAdjusted { timestamp, .. } => *timestamp,
             LotteryEvent::UploadPhaseBegan { timestamp, .. } => *timestamp,
             LotteryEvent::SettlementPhaseBegan { timestamp, .. } => *timestamp,

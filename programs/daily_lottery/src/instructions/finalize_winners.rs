@@ -24,12 +24,12 @@ use std::{collections::HashSet, fmt::Write as _};
 
 pub const WINNER_ALGO_RULE_VERSION: &str = "reveal-plaintext-draw-v2";
 const RPD_V2_SEED_DOMAIN: &[u8] = &[
-    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x53,
-    0x45, 0x45, 0x44,
+    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x53, 0x45,
+    0x45, 0x44,
 ];
 const RPD_V2_DRAW_DOMAIN: &[u8] = &[
-    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x44,
-    0x52, 0x41, 0x57,
+    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x44, 0x52,
+    0x41, 0x57,
 ];
 
 type DrawPoolEntry = (Pubkey, u64);
@@ -95,6 +95,30 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let current_phase = lottery.phase(current_time);
     let upload_elapsed =
         lottery.upload_deadline_unix > 0 && current_time > lottery.upload_deadline_unix;
+
+    if lottery.has_missing_attested_reveals() {
+        if upload_elapsed && lottery.remediation_start_unix == 0 {
+            lottery.begin_remediation(current_time);
+            write_account_data(lottery_ai, "Lottery", &lottery)?;
+            LotteryEvent::RevealRemediationBegan {
+                lottery_id: lottery.id,
+                lottery: lottery_ai.key.to_string(),
+                included_reveals_count: lottery.provider_uploaded_count,
+                attested_count: lottery.attested_count,
+                remediation_start_unix: lottery.remediation_start_unix,
+                remediation_deadline_unix: lottery.remediation_deadline_unix,
+                timestamp: current_time,
+            }
+            .emit();
+            return Ok(());
+        }
+
+        return Err(Error::InvalidPhaseTransition.into());
+    }
+
+    if lottery.attested_reveals_complete() && !lottery.uploads_complete {
+        lottery.uploads_complete = true;
+    }
 
     if current_phase != "settlement" && current_phase != "settled" && !upload_elapsed {
         return Err(Error::InvalidInstruction.into());

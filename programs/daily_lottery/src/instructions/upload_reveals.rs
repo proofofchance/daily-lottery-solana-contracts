@@ -1,11 +1,13 @@
 //! # Upload Proofs (Chunk) Instruction
 //!
 //! Allows the service provider to upload batch reveals for settlement.
-//! This instruction is called by the authority to upload all participant reveals
-//! after the reveal window has opened and participants have attested.
+//! After the upload deadline, if any accepted/attested reveal was omitted, the
+//! same instruction becomes permissionless remediation: any signer can include
+//! missing attested reveals before the remediation deadline.
 
 use crate::{
     error::Error,
+    events::LotteryEvent,
     state::{Config, Lottery, Participant, VoteTally},
     utils::{
         account::{read_account_data, validate_account_discriminator, write_account_data},
@@ -27,8 +29,8 @@ use solana_sha256_hasher::{hash, hashv};
 use solana_system_interface::{instruction as system_instruction, program as system_program};
 
 const RPD_V2_REVEAL_DOMAIN: &[u8] = &[
-    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x52,
-    0x45, 0x56, 0x45, 0x41, 0x4c,
+    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x52, 0x45,
+    0x56, 0x45, 0x41, 0x4c,
 ];
 
 fn compute_reveal_digest(wallet: &Pubkey, plaintext: &[u8]) -> [u8; 32] {
@@ -55,12 +57,13 @@ fn xor_reveal_digests(initial: [u8; 32], digests: &[[u8; 32]]) -> [u8; 32] {
 /// Process the Upload Proofs (chunk) instruction
 ///
 /// Uploads batch reveals from all attested participants and prepares for settlement.
-/// Only the authority can call this instruction during the reveal window.
+/// The authority can upload during the normal upload/settlement path. During
+/// omitted-reveal remediation, any signer can upload missing attested reveals.
 ///
 /// # Accounts Expected
 /// 0. `[]` Config account
 /// 1. `[writable]` Lottery account
-/// 2. `[signer]` Authority (payer if VoteTally PDA is created)
+/// 2. `[signer]` Uploader (authority in normal path; any signer in remediation)
 /// 3. `[]` System program
 /// 4. `[writable]` VoteTally PDA (`["vote_tally", lottery]`)
 ///    5..N. `[]` Participant accounts (for all attested participants)
@@ -74,14 +77,14 @@ pub fn process(
     // Get accounts
     let config_ai = next_account_info(account_info_iter)?;
     let lottery_ai = next_account_info(account_info_iter)?;
-    let authority_ai = next_account_info(account_info_iter)?;
+    let uploader_ai = next_account_info(account_info_iter)?;
     let system_program_ai = next_account_info(account_info_iter)?;
     let vote_tally_ai = next_account_info(account_info_iter)?;
 
     // Validate accounts
     assert_pda_owned(program_id, config_ai, &[b"config"])?;
     require_writable(lottery_ai)?;
-    require_signer(authority_ai)?;
+    require_signer(uploader_ai)?;
     require_writable(vote_tally_ai)?;
     require_key_match(system_program_ai, &system_program::id())?;
 
@@ -109,14 +112,40 @@ pub fn process(
         return Err(Error::InvalidAccountData.into());
     }
 
-    // Validate authority
-    if authority_ai.key != &config.authority {
-        return Err(Error::Unauthorized.into());
-    }
-
     // Get current time for event timestamp
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
+    let upload_elapsed =
+        lottery.upload_deadline_unix > 0 && current_time > lottery.upload_deadline_unix;
+    let all_attested =
+        lottery.participants_count > 0 && lottery.attested_count == lottery.participants_count;
+    let is_authority = uploader_ai.key == &config.authority;
+    let can_remediate = !is_authority
+        && upload_elapsed
+        && lottery.has_missing_attested_reveals()
+        && !lottery.remediation_expired(current_time);
+
+    if lottery.remediation_expired(current_time) {
+        return Err(Error::InvalidPhaseTransition.into());
+    }
+
+    if !is_authority && !can_remediate {
+        return Err(Error::Unauthorized.into());
+    }
+
+    if can_remediate && lottery.remediation_start_unix == 0 {
+        lottery.begin_remediation(current_time);
+        LotteryEvent::RevealRemediationBegan {
+            lottery_id: lottery.id,
+            lottery: lottery_ai.key.to_string(),
+            included_reveals_count: lottery.provider_uploaded_count,
+            attested_count: lottery.attested_count,
+            remediation_start_unix: lottery.remediation_start_unix,
+            remediation_deadline_unix: lottery.remediation_deadline_unix,
+            timestamp: current_time,
+        }
+        .emit();
+    }
 
     // Must not be settled; enforce monotonic transition into settlement
     if lottery.settled || lottery.settlement_complete || lottery.uploads_complete {
@@ -131,11 +160,6 @@ pub fn process(
         );
         return Err(Error::InvalidPhaseTransition.into());
     }
-
-    let upload_elapsed =
-        lottery.upload_deadline_unix > 0 && current_time > lottery.upload_deadline_unix;
-    let all_attested =
-        lottery.participants_count > 0 && lottery.attested_count == lottery.participants_count;
 
     if !upload_elapsed && !all_attested && lottery.settlement_start_unix == 0 {
         solana_program::msg!(
@@ -173,8 +197,8 @@ pub fn process(
         return Err(Error::InvalidSeeds.into());
     }
     let mut vote_tally = if vote_tally_ai.data_is_empty() {
-        // Authority pays for account creation
-        require_writable(authority_ai)?;
+        // Uploader pays for account creation
+        require_writable(uploader_ai)?;
         assert_pda_key(
             program_id,
             vote_tally_ai,
@@ -183,7 +207,7 @@ pub fn process(
         let space = VoteTally::account_size_for(max_winners as usize);
         let lamports = Rent::get()?.minimum_balance(space);
         let create_ix = system_instruction::create_account(
-            authority_ai.key,
+            uploader_ai.key,
             vote_tally_ai.key,
             lamports,
             space as u64,
@@ -192,7 +216,7 @@ pub fn process(
         invoke_signed(
             &create_ix,
             &[
-                authority_ai.clone(),
+                uploader_ai.clone(),
                 vote_tally_ai.clone(),
                 system_program_ai.clone(),
             ],
@@ -343,6 +367,16 @@ pub fn process(
     lottery.provider_uploaded_count = lottery.provider_uploaded_count.saturating_add(new_uploads);
     if lottery.provider_uploaded_count >= lottery.attested_count {
         lottery.uploads_complete = true;
+        if lottery.remediation_start_unix > 0 {
+            LotteryEvent::RevealRemediationCompleted {
+                lottery_id: lottery.id,
+                lottery: lottery_ai.key.to_string(),
+                included_reveals_count: lottery.provider_uploaded_count,
+                attested_count: lottery.attested_count,
+                timestamp: current_time,
+            }
+            .emit();
+        }
     }
     lottery.poc_aggregate_hash = aggregate_hash;
     // Enforce bounds here too
@@ -355,7 +389,7 @@ pub fn process(
     let event = crate::events::LotteryEvent::RevealsUploaded {
         lottery_id: lottery.id,
         lottery: lottery_ai.key.to_string(),
-        authority: config.authority.to_string(),
+        authority: uploader_ai.key.to_string(),
         participants_count: lottery.provider_uploaded_count,
         aggregate_hash,
         selected_number_of_winners: lottery.selected_number_of_winners,

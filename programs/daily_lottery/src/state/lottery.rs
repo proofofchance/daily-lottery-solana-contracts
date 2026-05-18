@@ -6,7 +6,8 @@
 //! ## Lifecycle Phases
 //! 1. **Buy**: Accepting ticket purchases (window)
 //! 2. **Upload**: Participants upload PoC to provider and vote-and-attest on-chain (window)
-//! 3. **Settlement**: Provider uploads proofs in batches and settlement executes (no deadline)
+//! 3. **Remediation**: Anyone can include signed/attested reveals omitted by the provider
+//! 4. **Settlement**: Winners are computed only after every attested reveal is included
 //!
 //! ## Timing Model
 //! - `created_at_unix`: When lottery was created
@@ -137,6 +138,12 @@ pub struct Lottery {
 
     /// Whether all winners have been paid and settlement is complete
     pub settlement_complete: bool,
+
+    /// When omitted-reveal remediation began (0 if not active/needed)
+    pub remediation_start_unix: i64,
+
+    /// When omitted-reveal remediation expires (0 if not active/needed)
+    pub remediation_deadline_unix: i64,
 }
 
 impl Lottery {
@@ -183,6 +190,8 @@ impl Lottery {
             paid_winners_bitmap: vec![0u8; crate::state::sizes::MAX_WINNERS.div_ceil(8)],
             settlement_batches_completed: 0,
             settlement_complete: false,
+            remediation_start_unix: 0,
+            remediation_deadline_unix: 0,
         }
     }
 
@@ -256,6 +265,10 @@ impl Lottery {
             return "settled";
         }
 
+        if self.remediation_active(current_time) {
+            return "remediation";
+        }
+
         // If settlement has explicitly begun, treat as settlement even if upload window is open
         if self.settlement_start_unix > 0 {
             return "settlement";
@@ -274,6 +287,40 @@ impl Lottery {
         }
 
         "settlement"
+    }
+
+    /// Returns true when some accepted/attested reveals have not yet been included.
+    pub fn has_missing_attested_reveals(&self) -> bool {
+        self.attested_count > 0 && self.provider_uploaded_count < self.attested_count
+    }
+
+    /// Returns true when every accepted/attested reveal has been included.
+    pub fn attested_reveals_complete(&self) -> bool {
+        self.attested_count > 0 && self.provider_uploaded_count >= self.attested_count
+    }
+
+    /// Starts omitted-reveal remediation if it is needed and has not already started.
+    pub fn begin_remediation(&mut self, current_time: i64) {
+        if self.remediation_start_unix == 0 {
+            self.remediation_start_unix = current_time;
+            self.remediation_deadline_unix =
+                current_time + crate::state::sizes::DEFAULT_REMEDIATION_WINDOW_SECS;
+        }
+    }
+
+    /// Returns true while the remediation/challenge window is open.
+    pub fn remediation_active(&self, current_time: i64) -> bool {
+        self.remediation_start_unix > 0
+            && self.remediation_deadline_unix > 0
+            && current_time <= self.remediation_deadline_unix
+            && self.has_missing_attested_reveals()
+    }
+
+    /// Returns true when omitted-reveal remediation expired without full inclusion.
+    pub fn remediation_expired(&self, current_time: i64) -> bool {
+        self.remediation_deadline_unix > 0
+            && current_time > self.remediation_deadline_unix
+            && self.has_missing_attested_reveals()
     }
 
     /// Checks if the lottery is effectively settled (either explicitly or via stateless rules)

@@ -91,10 +91,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
 
     // Valid finalize scenarios after deadline:
     // 1) No attestations at all
-    // 2) Some attestations but zero reveals uploaded
+    // 2) Some accepted/attested reveals were omitted and remediation expired
     let no_attestations = lottery.attested_count == 0;
-    let no_reveals_uploaded = lottery.provider_uploaded_count == 0;
-    if !(no_attestations || no_reveals_uploaded) {
+    let remediation_expired = lottery.remediation_expired(clock.unix_timestamp);
+    if !(no_attestations || remediation_expired) {
         return Err(Error::InvalidInstruction.into());
     }
 
@@ -133,6 +133,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
             "Single participant refunded".to_string()
         } else if no_attestations {
             "No attestations submitted".to_string()
+        } else if remediation_expired {
+            "Accepted reveals omitted after remediation window".to_string()
         } else {
             "No reveals uploaded by provider".to_string()
         },

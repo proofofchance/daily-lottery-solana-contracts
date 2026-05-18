@@ -38,6 +38,9 @@ pub use winners_ledger::*;
 pub mod sizes {
     /// Maximum number of winners supported (affects lottery account size)
     pub const MAX_WINNERS: usize = 256;
+    /// Default remediation/challenge window after upload deadline when accepted
+    /// attested reveals have not all been included.
+    pub const DEFAULT_REMEDIATION_WINDOW_SECS: i64 = 30 * 60;
     /// Size of Config account in bytes (discriminator + data)
     /// authority[32] + ticket_price_lamports[8] + service_charge_bps[2] + lottery_count[8] + buy_window_secs[4] + upload_window_secs[4] + max_winners_cap[4]
     pub const CONFIG_SIZE: usize = 8 + 32 + 8 + 2 + 8 + 4 + 4 + 4;
@@ -53,6 +56,7 @@ pub mod sizes {
     /// + attested_count[8] + participants_count[8] + selected_number_of_winners[8]
     /// + winners_merkle_root[32] + winners_count[8] + total_payout[8]
     /// + paid_winners_bitmap[4+32] + settlement_batches_completed[4] + settlement_complete[1]
+    /// + remediation_start_unix[8] + remediation_deadline_unix[8]
     pub const LOTTERY_SIZE: usize = 8
         + 8
         + 32
@@ -80,7 +84,9 @@ pub mod sizes {
         + 8
         + (4 + MAX_WINNERS.div_ceil(8))
         + 4
-        + 1;
+        + 1
+        + 8
+        + 8;
 
     /// Size of Participant account in bytes (discriminator + data)
     /// lottery[32] + wallet[32] + reveal_hash[32] + tickets[8] + attested[1]

@@ -300,8 +300,11 @@ fn finalize_winners_sets_fields() {
         lottery_pda,
         &authority,
         vote_tally_pda,
-        vec![(participant_a, secret_a.to_vec())],
-        vec![participant_a],
+        vec![
+            (participant_a, secret_a.to_vec()),
+            (participant_b, secret_b.to_vec()),
+        ],
+        vec![participant_a, participant_b],
     );
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
