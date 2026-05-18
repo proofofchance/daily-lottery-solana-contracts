@@ -7,10 +7,10 @@ use litesvm::{
     types::{FailedTransactionMetadata, TransactionResult},
     LiteSVM,
 };
-use solana_program::{clock::Clock, pubkey::Pubkey};
 use solana_account::Account;
 use solana_instruction::{error::InstructionError, Instruction};
 use solana_keypair::Keypair;
+use solana_program::{clock::Clock, pubkey::Pubkey};
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 use solana_transaction_error::TransactionError;
@@ -127,13 +127,13 @@ fn candidate_program_dirs() -> Vec<PathBuf> {
         }
     }
 
+    dirs.push(manifest_dir.join("../../target/sbpf-solana-solana/release"));
+    dirs.push(manifest_dir.join("../target/sbpf-solana-solana/release"));
+    dirs.push(manifest_dir.join("target/sbpf-solana-solana/release"));
     dirs.push(manifest_dir.join("target/deploy"));
     dirs.push(manifest_dir.join("../../target/deploy"));
     dirs.push(manifest_dir.join("../target/deploy"));
-    dirs
-        .into_iter()
-        .map(normalize_path)
-        .collect::<Vec<_>>()
+    dirs.into_iter().map(normalize_path).collect::<Vec<_>>()
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {

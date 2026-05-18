@@ -3,11 +3,11 @@ mod common;
 use borsh::BorshDeserialize;
 use common::TestContext;
 use daily_lottery::*;
-use solana_program::pubkey::Pubkey;
 use solana_instruction::{AccountMeta, Instruction as SdkIx};
 use solana_keypair::Keypair;
-use solana_signer::Signer;
+use solana_program::pubkey::Pubkey;
 use solana_sha256_hasher::hash;
+use solana_signer::Signer;
 use solana_system_interface::program as system_program;
 use std::io::Cursor;
 
@@ -105,7 +105,9 @@ fn create_and_buy_flow() {
     assert_eq!(lot.total_tickets, 2);
     assert_eq!(lot.total_funds, 2_000_000);
 
-    let part_account = ctx.get_account(participant_pda).expect("participant account");
+    let part_account = ctx
+        .get_account(participant_pda)
+        .expect("participant account");
     let part: Participant = read_after_disc(&part_account.data);
     assert_eq!(part.tickets_bought, 2);
     assert_eq!(part.proof_of_chance_hash, poc_hash);

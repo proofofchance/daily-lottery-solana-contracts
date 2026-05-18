@@ -98,37 +98,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         return Err(Error::InvalidSeeds.into());
     }
 
-    // Calculate rent for lottery account (bitmap sized to MAX_WINNERS)
+    // Calculate rent for lottery account.
     let rent = Rent::get()?;
-    let bitmap_bytes = crate::state::sizes::MAX_WINNERS.div_ceil(8);
-    // Base (without vec payload):
-    let base = 8
-        + 8
-        + 32
-        + 32
-        + 8
-        + 8
-        + 8
-        + 8
-        + 8
-        + 8
-        + 1
-        + 8
-        + 8
-        + 8
-        + 32
-        + 1
-        + 1
-        + 32
-        + 1
-        + 8
-        + 8
-        + 8
-        + 32
-        + 8
-        + 8
-        + 4;
-    let lottery_space = base + 4 /*vec len*/ + bitmap_bytes + 4 /*settlement_batches_completed*/ + 1 /*settlement_complete*/;
+    let lottery_space = crate::state::sizes::LOTTERY_SIZE;
     let lottery_rent = rent.minimum_balance(lottery_space);
 
     // Calculate rent for vault account
