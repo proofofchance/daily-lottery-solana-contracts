@@ -1,5 +1,5 @@
 {
-  "name": "daily-lottery-solana-contracts-private",
+  "name": "daily-lottery-solana-contracts",
   "description": "Daily lottery Solana contracts workspace",
   "private": true,
   "scripts": {
