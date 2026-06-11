@@ -6,7 +6,7 @@ source, and tests.
 Common local commands:
 
 - `cargo fmt --all --check`
-- `cargo test --workspace`
+- `cargo test --workspace --features "allow-early-upload allow-service-charge-update"`
 - `npm test`
 - `npm run lint`
 
