@@ -8,8 +8,8 @@
 //!
 //! ### Administrative Instructions
 //! - [`initialize`]: Initialize the lottery system configuration
-//! - [`update_service_charge`]: Update the service charge rate
-//! - [`adjust_reveal_window`]: Emergency adjustment of reveal timing
+//! - [`update_service_charge`]: Update the service charge rate in feature-enabled builds
+//! - [`begin_reveal_phase`]: Feature-gated local/staging upload timing control
 //!
 //! ### Lottery Lifecycle Instructions  
 //! - [`create_lottery`]: Create a new daily lottery instance
@@ -19,15 +19,19 @@
 //! ### Participant Instructions
 //! - [`buy_tickets`]: Purchase lottery tickets with proof-of-chance
 //! - [`attest_uploaded`]: Attest to off-chain reveal upload
+//! - [`attest_reveal`]: Attest and include a reveal on-chain
+//! - [`claim_refund`]: Claim a program-vault refund after cancellation
 //!
 //! ### Provider Instructions
 //! - [`upload_reveals`]: Upload batch of participant reveals
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
+pub mod attest_reveal;
 pub mod attest_uploaded;
 pub mod begin_reveal_phase;
 pub mod buy_tickets;
+pub mod claim_refund;
 pub mod create_lottery;
 pub mod finalize_no_attesters;
 pub mod finalize_winners;
@@ -37,9 +41,11 @@ pub mod update_service_charge;
 pub mod upload_reveals;
 
 // Re-export specific functions to avoid ambiguous glob imports
+pub use attest_reveal::process as process_attest_reveal;
 pub use attest_uploaded::process as process_attest_uploaded;
 pub use begin_reveal_phase::process as process_begin_reveal_phase;
 pub use buy_tickets::process as process_buy_tickets;
+pub use claim_refund::process as process_claim_refund;
 pub use create_lottery::process as process_create_lottery;
 pub use finalize_no_attesters::process as process_finalize_no_attesters;
 pub use finalize_winners::process as process_finalize_winners;
@@ -61,6 +67,8 @@ pub const TAG_FINALIZE_WINNERS: u8 = 7;
 pub const TAG_BEGIN_REVEAL_PHASE: u8 = 8;
 pub const TAG_FINALIZE_NO_ATTESTERS: u8 = 9;
 pub const TAG_SETTLE_PAYOUT_BATCH: u8 = 10;
+pub const TAG_CLAIM_REFUND: u8 = 14;
+pub const TAG_ATTEST_REVEAL: u8 = 15;
 
 /// All possible instructions for the daily lottery program
 ///
@@ -89,8 +97,8 @@ pub enum Instruction {
 
     /// Update the service charge rate
     ///
-    /// Only the authority can update the service charge rate.
-    /// Used to adjust platform fees as needed.
+    /// Only the authority can update the service charge rate in builds with
+    /// `allow-service-charge-update`.
     ///
     /// Accounts expected:
     /// 0. `[writable]` Config account
@@ -205,7 +213,7 @@ pub enum Instruction {
     /// Begin the reveal phase immediately (testing-only convenience)
     ///
     /// Authority-only. Sets the reveal window to start now and end after the
-    /// standard duration (24h in production, 10 minutes with `short_time`).
+    /// standard duration. Only available in builds with `allow-early-upload`.
     /// Fails if lottery is settled or already within the reveal window.
     ///
     /// Accounts expected:
@@ -216,14 +224,14 @@ pub enum Instruction {
 
     /// Finalize lottery when no attestations were submitted
     ///
-    /// Emits RefundsIssued event for external systems to handle refunds.
+    /// Emits RefundsIssued event so participants can claim refunds on-chain.
     /// Can only be called after attestation deadline has passed.
     ///
     /// Accounts expected:
     /// 0. `[]` Config account
     /// 1. `[writable]` Lottery account
     /// 2. `[writable]` Vault account
-    /// 3. `[writable]` Authority wallet (refund recipient)
+    /// 3. `[writable]` Authority wallet (signer)
     FinalizeNoAttesters,
 
     /// Process a batch of winner payouts
@@ -258,6 +266,28 @@ pub enum Instruction {
     ///
     /// Tag 13 is removed from manual dispatch and is no longer supported.
     SettlementFinalize,
+
+    /// Claim a refund after a cancelled/no-attester lottery.
+    ///
+    /// Accounts expected:
+    /// 0. `[]` Config account
+    /// 1. `[writable]` Lottery account
+    /// 2. `[writable]` Vault account
+    /// 3. `[writable]` Participant account
+    /// 4. `[writable, signer]` Participant wallet
+    ClaimRefund,
+
+    /// Permissionlessly attest and include a reveal on-chain.
+    ///
+    /// Accounts expected:
+    /// 0. `[]` Config account
+    /// 1. `[writable]` Lottery account
+    /// 2. `[writable]` Participant account
+    /// 3. `[signer]` Participant wallet
+    AttestReveal {
+        voted_number_of_winners: u64,
+        reveal_plaintext: Vec<u8>,
+    },
 }
 
 /// Instruction processing dispatcher
@@ -457,6 +487,47 @@ pub fn process_instruction(
         TAG_FINALIZE_NO_ATTESTERS => {
             // Layout: [tag u8]
             process_finalize_no_attesters(program_id, accounts)
+        }
+
+        TAG_CLAIM_REFUND => {
+            // Layout: [tag u8]
+            process_claim_refund(program_id, accounts)
+        }
+
+        TAG_ATTEST_REVEAL => {
+            // Layout: [tag u8][voted_number_of_winners u64][reveal_plaintext Vec<u8>]
+            if instruction_data.len() < 1 + 8 + 4 {
+                return Err(crate::error::Error::InvalidInstruction.into());
+            }
+            let voted_number_of_winners = u64::from_le_bytes([
+                instruction_data[1],
+                instruction_data[2],
+                instruction_data[3],
+                instruction_data[4],
+                instruction_data[5],
+                instruction_data[6],
+                instruction_data[7],
+                instruction_data[8],
+            ]);
+            let reveal_len = u32::from_le_bytes([
+                instruction_data[9],
+                instruction_data[10],
+                instruction_data[11],
+                instruction_data[12],
+            ]) as usize;
+            let reveal_end = 13usize
+                .checked_add(reveal_len)
+                .ok_or(crate::error::Error::MathOverflow)?;
+            if instruction_data.len() < reveal_end {
+                return Err(crate::error::Error::InvalidInstruction.into());
+            }
+            let reveal_plaintext = instruction_data[13..reveal_end].to_vec();
+            process_attest_reveal(
+                program_id,
+                accounts,
+                voted_number_of_winners,
+                reveal_plaintext,
+            )
         }
 
         _ => {

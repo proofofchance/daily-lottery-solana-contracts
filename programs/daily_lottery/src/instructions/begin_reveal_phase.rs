@@ -1,8 +1,8 @@
 //! # Begin Reveal Phase Instruction (testing only)
 //!
-//! Allows the authority to force-open the reveal window immediately.
-//! This is intended for local development and testing convenience and
-//! may be removed in production builds.
+//! Allows the authority to force-open the upload/reveal window immediately.
+//! This is available only in builds with `allow-early-upload`, used for local
+//! testing and staging where waiting for production windows is impractical.
 
 use crate::{
     error::Error,
@@ -40,6 +40,10 @@ pub fn process(
     attestation_secs: u32,
     upload_secs: u32,
 ) -> ProgramResult {
+    if !cfg!(feature = "allow-early-upload") {
+        return Err(Error::EarlyUploadDisabled.into());
+    }
+
     let account_info_iter = &mut accounts.iter();
 
     let config_ai = next_account_info(account_info_iter)?;

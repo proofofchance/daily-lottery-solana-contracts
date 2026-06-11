@@ -2,7 +2,7 @@
 //!
 //! Finalizes a lottery when, by upload deadline, either (a) no attestations were
 //! submitted, or (b) some attestations exist but zero reveals were uploaded.
-//! Emits RefundsIssued event for external systems to handle refunds.
+//! Emits RefundsIssued event so participants can claim refunds on-chain.
 
 use crate::{
     error::Error,
@@ -11,7 +11,7 @@ use crate::{
     utils::{
         account::{read_account_data, write_account_data},
         pda::assert_pda_owned,
-        validation::{compute_service_fee, require_key_match, require_signer, require_writable},
+        validation::{require_key_match, require_signer, require_writable},
     },
 };
 use solana_program::{
@@ -24,14 +24,14 @@ use solana_program::{
 /// Process the FinalizeNoAttesters instruction
 ///
 /// Finalizes a lottery when no attestations were submitted by the deadline,
-/// or when there are attestations but zero reveals were uploaded by the deadline.
-/// This emits a RefundsIssued event that external systems can act upon.
+/// or when omitted attested reveals remain after remediation. This leaves vault
+/// funds under program control and emits a RefundsIssued event for claim flows.
 ///
 /// # Accounts Expected
 /// 0. `[]` Config account
 /// 1. `[writable]` Lottery account
 /// 2. `[writable]` Vault account
-/// 3. `[writable, signer]` Authority wallet (refund recipient)
+/// 3. `[writable, signer]` Authority wallet
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
 
@@ -104,19 +104,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     lottery.settle();
     write_account_data(lottery_ai, "Lottery", &lottery)?;
 
-    // Compute net refund after service fee (off-chain transfer semantics are not performed here;
-    // this event communicates the net amount to be refunded by the provider flow)
-    let service_fee = compute_service_fee(lottery.total_funds, config.service_charge_bps)?;
-    let net_refund = lottery.total_funds.saturating_sub(service_fee);
-
-    // Drain vault to authority so refunds can be processed off-chain.
-    let vault_lamports_ref = &mut **vault_ai.try_borrow_mut_lamports()?;
-    let authority_lamports_ref = &mut **authority_ai.try_borrow_mut_lamports()?;
-    let vault_balance = *vault_lamports_ref;
-    if vault_balance > 0 {
-        *authority_lamports_ref = authority_lamports_ref.saturating_add(vault_balance);
-        *vault_lamports_ref = 0;
-    }
+    // Cancellation/refund paths do not take a service fee. Funds stay in the
+    // vault and are transferred directly to participants by ClaimRefund.
+    let service_fee = 0u64;
+    let net_refund = lottery.total_funds;
 
     // Emit RefundsIssued event for external systems to handle
     solana_program::msg!(

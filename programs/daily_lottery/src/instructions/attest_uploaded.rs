@@ -158,7 +158,7 @@ pub fn process(
 
     // Helper to parse a single-signature ed25519 verify instruction created via web3.js.
     // Require inline data (instruction index = 0xFFFF) to prevent spoofed bytes.
-    fn parse_ed25519_ix<'a>(data: &'a [u8]) -> Option<(&'a [u8; 32], &'a [u8])> {
+    fn parse_ed25519_ix(data: &[u8]) -> Option<(&[u8; 32], &[u8])> {
         // Must contain at least header for 1 signature: 1 (num) + 1 (pad) + 14 bytes
         if data.len() < 16 {
             return None;

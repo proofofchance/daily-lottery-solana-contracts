@@ -221,6 +221,17 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
+    /// Emitted when a participant claims an on-chain refund from a cancelled round
+    RefundClaimed {
+        lottery_id: u64,
+        lottery: String,
+        participant: String,
+        wallet: String,
+        amount: u64,
+        tickets_refunded: u64,
+        timestamp: i64,
+    },
+
     /// Emitted when winners are finalized and merkle root is stored
     WinnersFinalized {
         lottery_id: u64,
@@ -341,6 +352,7 @@ impl LotteryEvent {
             LotteryEvent::WinnersLuckyWords { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::NoBuyersConcluded { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RefundsIssued { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::RefundClaimed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnersFinalized { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnerPaid { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::PayoutsComplete { lottery_id, .. } => Some(*lottery_id),
@@ -374,6 +386,7 @@ impl LotteryEvent {
             LotteryEvent::WinnersLuckyWords { timestamp, .. } => *timestamp,
             LotteryEvent::NoBuyersConcluded { timestamp, .. } => *timestamp,
             LotteryEvent::RefundsIssued { timestamp, .. } => *timestamp,
+            LotteryEvent::RefundClaimed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnersFinalized { timestamp, .. } => *timestamp,
             LotteryEvent::WinnerPaid { timestamp, .. } => *timestamp,
             LotteryEvent::PayoutsComplete { timestamp, .. } => *timestamp,

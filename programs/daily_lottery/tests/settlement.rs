@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
+
 mod common;
 
 use borsh::BorshDeserialize;
@@ -205,6 +207,29 @@ fn upload_reveals(
         data: borsh::to_vec(&Instruction::UploadReveals { entries }).unwrap(),
     };
     send_tx(ctx, vec![upload_ix], &[authority]).unwrap();
+}
+
+fn claim_refund(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    vault_pda: Pubkey,
+    participant_pda: Pubkey,
+    wallet: &Keypair,
+) -> litesvm::types::TransactionResult {
+    let ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(participant_pda, false),
+            AccountMeta::new(wallet.pubkey(), true),
+        ],
+        data: borsh::to_vec(&Instruction::ClaimRefund).unwrap(),
+    };
+    send_tx(ctx, vec![ix], &[wallet])
 }
 
 fn load_lottery(ctx: &mut TestContext, lottery_pda: Pubkey) -> Lottery {
@@ -437,7 +462,7 @@ fn single_participant_refund_can_settle_before_upload_deadline() {
 
     let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
 
-    buy_tickets(
+    let participant_pda = buy_tickets(
         &mut ctx,
         program_id,
         config_pda,
@@ -477,6 +502,20 @@ fn single_participant_refund_can_settle_before_upload_deadline() {
     let lot = load_lottery(&mut ctx, lottery_pda);
     assert!(lot.settled);
     assert_eq!(lot.winners_count, 0);
+
+    let buyer_before = ctx.get_account(buyer.pubkey()).unwrap().lamports;
+    claim_refund(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        participant_pda,
+        &buyer,
+    )
+    .unwrap();
+    let buyer_after = ctx.get_account(buyer.pubkey()).unwrap().lamports;
+    assert_eq!(buyer_after, buyer_before + 1_000_000);
 }
 
 #[test]
@@ -489,7 +528,7 @@ fn finalize_no_attesters_refund_path_still_works() {
 
     let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
 
-    buy_tickets(
+    let participant_a = buy_tickets(
         &mut ctx,
         program_id,
         config_pda,
@@ -499,7 +538,7 @@ fn finalize_no_attesters_refund_path_still_works() {
         b"refund-a",
         1,
     );
-    buy_tickets(
+    let participant_b = buy_tickets(
         &mut ctx,
         program_id,
         config_pda,
@@ -522,6 +561,7 @@ fn finalize_no_attesters_refund_path_still_works() {
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
     let authority_before = ctx.get_account(authority.pubkey()).unwrap().lamports;
+    let vault_before = ctx.get_account(vault_pda).unwrap().lamports;
 
     let finalize_no_attesters_ix = SdkIx {
         program_id,
@@ -539,15 +579,204 @@ fn finalize_no_attesters_refund_path_still_works() {
     assert!(lot.settled);
     assert_eq!(lot.winners_count, 0);
 
-    if let Some(vault) = ctx.get_account(vault_pda) {
-        assert_eq!(vault.lamports, 0);
+    let authority_after = ctx.get_account(authority.pubkey()).unwrap().lamports;
+    assert_eq!(
+        authority_after, authority_before,
+        "authority should not receive participant refund funds"
+    );
+    assert_eq!(ctx.get_account(vault_pda).unwrap().lamports, vault_before);
+
+    let buyer_a_before = ctx.get_account(buyer_a.pubkey()).unwrap().lamports;
+    claim_refund(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        participant_a,
+        &buyer_a,
+    )
+    .unwrap();
+    let buyer_a_after = ctx.get_account(buyer_a.pubkey()).unwrap().lamports;
+    assert_eq!(buyer_a_after, buyer_a_before + 1_000_000);
+
+    let double_claim_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(participant_a, false),
+            AccountMeta::new(buyer_a.pubkey(), true),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: borsh::to_vec(&Instruction::ClaimRefund).unwrap(),
+    };
+    let double_claim = send_tx(&mut ctx, vec![double_claim_ix], &[&buyer_a])
+        .expect_err("double refund claim should fail");
+    assert_custom_error(double_claim, Error::RefundAlreadyClaimed as u32);
+
+    let buyer_b_before = ctx.get_account(buyer_b.pubkey()).unwrap().lamports;
+    claim_refund(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        participant_b,
+        &buyer_b,
+    )
+    .unwrap();
+    let buyer_b_after = ctx.get_account(buyer_b.pubkey()).unwrap().lamports;
+    assert_eq!(buyer_b_after, buyer_b_before + 1_000_000);
+}
+
+#[test]
+fn participant_cap_rejects_new_participants_before_settlement_becomes_unfinalizable() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let participant_cap = daily_lottery::state::sizes::MAX_SETTLEMENT_PARTICIPANTS as usize;
+    let buyers = (0..=participant_cap)
+        .map(|_| Keypair::new())
+        .collect::<Vec<_>>();
+    let mut funded_accounts = Vec::with_capacity(participant_cap + 2);
+    funded_accounts.push(&authority);
+    funded_accounts.extend(buyers.iter());
+    let mut ctx = TestContext::new(program_id, &funded_accounts);
+
+    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+
+    for (index, buyer) in buyers.iter().take(participant_cap).enumerate() {
+        let secret = format!("cap-participant-{index}");
+        buy_tickets(
+            &mut ctx,
+            program_id,
+            config_pda,
+            lottery_pda,
+            vault_pda,
+            buyer,
+            secret.as_bytes(),
+            1,
+        );
     }
 
-    let authority_after = ctx.get_account(authority.pubkey()).unwrap().lamports;
-    assert!(
-        authority_after > authority_before,
-        "authority should receive refunded vault funds"
+    let overflow_buyer = &buyers[participant_cap];
+    let overflow_participant = participant_pda(&program_id, &lottery_pda, &overflow_buyer.pubkey());
+    let overflow_secret = b"cap-overflow";
+    let overflow_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(overflow_participant, false),
+            AccountMeta::new(overflow_buyer.pubkey(), true),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: borsh::to_vec(&Instruction::BuyTickets {
+            proof_of_chance_hash: Some(hash(overflow_secret).to_bytes()),
+            number_of_tickets: 1,
+        })
+        .unwrap(),
+    };
+    let err = send_tx(&mut ctx, vec![overflow_ix], &[overflow_buyer])
+        .expect_err("new participants beyond the cap should be rejected");
+    assert_custom_error(err, Error::ParticipantLimitReached as u32);
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert_eq!(
+        lot.participants_count,
+        daily_lottery::state::sizes::MAX_SETTLEMENT_PARTICIPANTS
     );
+}
+
+#[test]
+fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer_a = Keypair::new();
+    let buyer_b = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
+
+    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+
+    let secret_a = b"self-a\x1fsalt";
+    let secret_b = b"self-b\x1fsalt";
+    let participant_a = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_a,
+        secret_a,
+        1,
+    );
+    let participant_b = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_b,
+        secret_b,
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+
+    for (buyer, participant, secret) in [
+        (&buyer_a, participant_a, secret_a.as_slice()),
+        (&buyer_b, participant_b, secret_b.as_slice()),
+    ] {
+        let ix = SdkIx {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(config_pda, false),
+                AccountMeta::new(lottery_pda, false),
+                AccountMeta::new(participant, false),
+                AccountMeta::new_readonly(buyer.pubkey(), true),
+            ],
+            data: borsh::to_vec(&Instruction::AttestReveal {
+                voted_number_of_winners: 1,
+                reveal_plaintext: secret.to_vec(),
+            })
+            .unwrap(),
+        };
+        send_tx(&mut ctx, vec![ix], &[buyer]).unwrap();
+    }
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert_eq!(lot.attested_count, 2);
+    assert_eq!(lot.provider_uploaded_count, 2);
+    assert!(lot.uploads_complete);
+    assert!(lot.settlement_start_unix > 0);
+
+    let finalize_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new_readonly(authority.pubkey(), true),
+            AccountMeta::new(participant_a, false),
+            AccountMeta::new(participant_b, false),
+        ],
+        data: borsh::to_vec(&Instruction::FinalizeWinners).unwrap(),
+    };
+    send_tx(&mut ctx, vec![finalize_ix], &[&authority]).unwrap();
+
+    let finalized = load_lottery(&mut ctx, lottery_pda);
+    assert_eq!(finalized.winners_count, 1);
+    assert_ne!(finalized.winners_merkle_root, [0u8; 32]);
 }
 
 #[test]

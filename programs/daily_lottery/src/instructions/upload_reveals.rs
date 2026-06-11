@@ -11,6 +11,7 @@ use crate::{
     state::{Config, Lottery, Participant, VoteTally},
     utils::{
         account::{read_account_data, validate_account_discriminator, write_account_data},
+        crypto::{compute_reveal_digest, xor_reveal_digests},
         limits::MAX_REVEAL_PLAINTEXT_BYTES,
         pda::{assert_pda_key, assert_pda_owned, derive_vote_tally_pda},
         validation::{require_key_match, require_signer, require_writable},
@@ -25,34 +26,8 @@ use solana_program::{
     pubkey::Pubkey,
     sysvar::Sysvar,
 };
-use solana_sha256_hasher::{hash, hashv};
+use solana_sha256_hasher::hash;
 use solana_system_interface::{instruction as system_instruction, program as system_program};
-
-const RPD_V2_REVEAL_DOMAIN: &[u8] = &[
-    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x52, 0x45,
-    0x56, 0x45, 0x41, 0x4c,
-];
-
-fn compute_reveal_digest(wallet: &Pubkey, plaintext: &[u8]) -> [u8; 32] {
-    let plaintext_len_le = (plaintext.len() as u32).to_le_bytes();
-    hashv(&[
-        RPD_V2_REVEAL_DOMAIN,
-        &wallet.to_bytes(),
-        &plaintext_len_le,
-        plaintext,
-    ])
-    .to_bytes()
-}
-
-fn xor_reveal_digests(initial: [u8; 32], digests: &[[u8; 32]]) -> [u8; 32] {
-    let mut aggregate_hash = initial;
-    for digest in digests.iter() {
-        for i in 0..aggregate_hash.len() {
-            aggregate_hash[i] ^= digest[i];
-        }
-    }
-    aggregate_hash
-}
 
 /// Process the Upload Proofs (chunk) instruction
 ///

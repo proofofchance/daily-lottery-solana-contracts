@@ -62,6 +62,9 @@ pub struct Participant {
 impl Participant {
     const REVEAL_INCLUDED_FLAG: u64 = 1 << 63;
     const SETTLEMENT_INCLUDED_FLAG: u64 = 1 << 62;
+    const REFUND_CLAIMED_FLAG: u64 = 1 << 61;
+    const STATE_FLAGS_MASK: u64 =
+        Self::REVEAL_INCLUDED_FLAG | Self::SETTLEMENT_INCLUDED_FLAG | Self::REFUND_CLAIMED_FLAG;
 
     /// Creates a new participant with their first ticket purchase
     pub fn new(
@@ -131,15 +134,13 @@ impl Participant {
             // Disallow changing vote after attestation
             return Err(crate::error::Error::InvalidInstruction);
         }
-        self.voted_number_of_winners =
-            voted_count & !(Self::REVEAL_INCLUDED_FLAG | Self::SETTLEMENT_INCLUDED_FLAG);
+        self.voted_number_of_winners = voted_count & !Self::STATE_FLAGS_MASK;
         Ok(())
     }
 
     /// Returns the recorded vote without the reveal-included flag.
     pub fn voted_winners(&self) -> u64 {
-        self.voted_number_of_winners
-            & !(Self::REVEAL_INCLUDED_FLAG | Self::SETTLEMENT_INCLUDED_FLAG)
+        self.voted_number_of_winners & !Self::STATE_FLAGS_MASK
     }
 
     /// Returns true if this participant's reveal has already been processed.
@@ -160,6 +161,16 @@ impl Participant {
     /// Marks the participant as processed during settlement (idempotent).
     pub fn mark_settlement_included(&mut self) {
         self.voted_number_of_winners |= Self::SETTLEMENT_INCLUDED_FLAG;
+    }
+
+    /// Returns true if this participant has claimed a refund for a cancelled round.
+    pub fn refund_claimed(&self) -> bool {
+        (self.voted_number_of_winners & Self::REFUND_CLAIMED_FLAG) != 0
+    }
+
+    /// Marks this participant refund as claimed.
+    pub fn mark_refund_claimed(&mut self) {
+        self.voted_number_of_winners |= Self::REFUND_CLAIMED_FLAG;
     }
 
     /// Checks if the participant has any tickets in this lottery
@@ -270,9 +281,11 @@ mod tests {
         participant.set_vote_number_of_winners(3).unwrap();
         participant.mark_reveal_included();
         participant.mark_settlement_included();
+        participant.mark_refund_claimed();
 
         assert_eq!(participant.voted_winners(), 3);
         assert!(participant.reveal_included());
         assert!(participant.settlement_included());
+        assert!(participant.refund_claimed());
     }
 }

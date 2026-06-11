@@ -4,6 +4,13 @@
 //! including hash aggregation and winner selection algorithms.
 
 use sha2::{Digest, Sha256};
+use solana_program::pubkey::Pubkey;
+use solana_sha256_hasher::hashv;
+
+const RPD_V2_REVEAL_DOMAIN: &[u8] = &[
+    0x49, 0x4b, 0x49, 0x47, 0x41, 0x49, 0x5f, 0x52, 0x50, 0x44, 0x5f, 0x56, 0x32, 0x5f, 0x52, 0x45,
+    0x56, 0x45, 0x41, 0x4c,
+];
 
 /// Aggregates multiple hashes into a single deterministic hash
 ///
@@ -34,6 +41,29 @@ pub fn aggregate_hashes(inputs: &[[u8; 32]]) -> [u8; 32] {
     let mut output = [0u8; 32];
     output.copy_from_slice(&result);
     output
+}
+
+/// Computes the deterministic reveal digest included in settlement entropy.
+pub fn compute_reveal_digest(wallet: &Pubkey, plaintext: &[u8]) -> [u8; 32] {
+    let plaintext_len_le = (plaintext.len() as u32).to_le_bytes();
+    hashv(&[
+        RPD_V2_REVEAL_DOMAIN,
+        &wallet.to_bytes(),
+        &plaintext_len_le,
+        plaintext,
+    ])
+    .to_bytes()
+}
+
+/// XORs reveal digests into an aggregate hash in a batch/order-independent way.
+pub fn xor_reveal_digests(initial: [u8; 32], digests: &[[u8; 32]]) -> [u8; 32] {
+    let mut aggregate_hash = initial;
+    for digest in digests.iter() {
+        for i in 0..aggregate_hash.len() {
+            aggregate_hash[i] ^= digest[i];
+        }
+    }
+    aggregate_hash
 }
 
 /// Selects a winning ticket index using deterministic randomness
@@ -137,6 +167,38 @@ mod tests {
         let inputs_reversed = [[3u8; 32], [2u8; 32], [1u8; 32]];
         let result_reversed = aggregate_hashes(&inputs_reversed);
         assert_ne!(result, result_reversed);
+    }
+
+    #[test]
+    fn reveal_digest_is_deterministic() {
+        let wallet = Pubkey::new_unique();
+        let plaintext = b"cool\x1f0123";
+        let d1 = compute_reveal_digest(&wallet, plaintext);
+        let d2 = compute_reveal_digest(&wallet, plaintext);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn reveal_digest_changes_with_wallet_or_plaintext() {
+        let wallet_a = Pubkey::new_unique();
+        let wallet_b = Pubkey::new_unique();
+        let d1 = compute_reveal_digest(&wallet_a, b"hello\x1fabcd");
+        let d2 = compute_reveal_digest(&wallet_a, b"hello!\x1fabcd");
+        let d3 = compute_reveal_digest(&wallet_b, b"hello\x1fabcd");
+        assert_ne!(d1, d2);
+        assert_ne!(d1, d3);
+    }
+
+    #[test]
+    fn xor_reveal_digest_is_order_independent() {
+        let wallet_a = Pubkey::new_unique();
+        let wallet_b = Pubkey::new_unique();
+        let d1 = compute_reveal_digest(&wallet_a, b"one\x1faaaa");
+        let d2 = compute_reveal_digest(&wallet_b, b"two\x1fbbbb");
+        let left = xor_reveal_digests([0u8; 32], &[d1, d2]);
+        let right = xor_reveal_digests([0u8; 32], &[d2, d1]);
+        assert_eq!(left, right);
+        assert_ne!(left, [0u8; 32]);
     }
 
     #[test]

@@ -33,6 +33,10 @@ use solana_program::{
 /// ## Parameters
 /// - `new_bps`: New service charge in basis points (0-9999)
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], new_bps: u16) -> ProgramResult {
+    if !cfg!(feature = "allow-service-charge-update") {
+        return Err(Error::ServiceChargeUpdateDisabled.into());
+    }
+
     let account_info_iter = &mut accounts.iter();
 
     // Get accounts

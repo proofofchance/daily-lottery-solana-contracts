@@ -38,6 +38,12 @@ pub use winners_ledger::*;
 pub mod sizes {
     /// Maximum number of winners supported (affects lottery account size)
     pub const MAX_WINNERS: usize = 256;
+    /// Maximum participants for one-transaction winner finalization.
+    ///
+    /// FinalizeWinners currently validates every participant account in a single
+    /// instruction, so this cap keeps rounds inside conservative account and CU
+    /// limits instead of letting funds get stuck in an unfinalizable round.
+    pub const MAX_SETTLEMENT_PARTICIPANTS: u64 = 48;
     /// Default remediation/challenge window after upload deadline when accepted
     /// attested reveals have not all been included.
     pub const DEFAULT_REMEDIATION_WINDOW_SECS: i64 = 30 * 60;

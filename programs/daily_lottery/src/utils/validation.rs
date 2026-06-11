@@ -280,7 +280,8 @@ mod tests {
         assert_eq!(fee, 250);
 
         let fee_max = compute_service_fee(u64::MAX, 9999).unwrap();
-        assert!(fee_max <= u64::MAX);
+        let expected = ((u128::from(u64::MAX) * 9999u128) / 10_000u128) as u64;
+        assert_eq!(fee_max, expected);
     }
 
     #[test]

@@ -147,6 +147,26 @@ pub enum Error {
     /// Invalid phase transition
     #[error("Invalid phase transition")]
     InvalidPhaseTransition,
+
+    /// The participant limit for one-transaction settlement has been reached
+    #[error("Participant limit reached")]
+    ParticipantLimitReached,
+
+    /// Refunds are unavailable for the current lottery state
+    #[error("Refund unavailable")]
+    RefundUnavailable,
+
+    /// Participant has already claimed a refund
+    #[error("Refund already claimed")]
+    RefundAlreadyClaimed,
+
+    /// Early upload/phase fast-track is disabled in this build
+    #[error("Early upload disabled")]
+    EarlyUploadDisabled,
+
+    /// Service charge updates are disabled in this build
+    #[error("Service charge update disabled")]
+    ServiceChargeUpdateDisabled,
 }
 
 impl From<Error> for ProgramError {
