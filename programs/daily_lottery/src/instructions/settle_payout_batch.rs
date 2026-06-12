@@ -220,7 +220,7 @@ pub fn process(
     // Check if all winners have been paid
     if ledger.all_winners_paid() {
         // Calculate and transfer service fee to authority
-        let service_fee = compute_service_fee(lottery.total_funds, config.service_charge_bps)?;
+        let service_fee = compute_service_fee(lottery.total_funds, lottery.service_charge_bps)?;
         let payout_remainder = lottery
             .total_funds
             .saturating_sub(lottery.total_payout)

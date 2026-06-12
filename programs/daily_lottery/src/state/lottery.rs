@@ -144,6 +144,9 @@ pub struct Lottery {
 
     /// When omitted-reveal remediation expires (0 if not active/needed)
     pub remediation_deadline_unix: i64,
+
+    /// Service charge basis points snapshotted when this lottery was created.
+    pub service_charge_bps: u16,
 }
 
 impl Lottery {
@@ -155,6 +158,7 @@ impl Lottery {
         created_at_unix: i64,
         vault: Pubkey,
         vault_bump: u8,
+        service_charge_bps: u16,
     ) -> Self {
         let (buy_start_unix, buy_deadline_unix, upload_start_unix, upload_deadline_unix) =
             Self::calculate_windows(created_at_unix);
@@ -192,6 +196,7 @@ impl Lottery {
             settlement_complete: false,
             remediation_start_unix: 0,
             remediation_deadline_unix: 0,
+            service_charge_bps,
         }
     }
 
@@ -513,7 +518,7 @@ mod tests {
         let vault = Pubkey::new_unique();
         let created_at = 1000;
 
-        let lottery = Lottery::new(1, config, authority, created_at, vault, 255);
+        let lottery = Lottery::new(1, config, authority, created_at, vault, 255, 500);
 
         assert_eq!(lottery.id, 1);
         assert_eq!(lottery.config, config);
@@ -521,8 +526,20 @@ mod tests {
         assert_eq!(lottery.created_at_unix, created_at);
         assert_eq!(lottery.vault, vault);
         assert_eq!(lottery.vault_bump, 255);
+        assert_eq!(lottery.service_charge_bps, 500);
         assert!(lottery.is_active());
         assert!(!lottery.settled);
+    }
+
+    #[test]
+    fn test_service_charge_is_creation_snapshot() {
+        let config = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let vault = Pubkey::new_unique();
+
+        let lottery = Lottery::new(1, config, authority, 1000, vault, 255, 250);
+
+        assert_eq!(lottery.service_charge_bps, 250);
     }
 
     #[test]
@@ -549,6 +566,7 @@ mod tests {
             current_time,
             Pubkey::default(),
             0,
+            500,
         );
         assert!(lottery.is_in_buy_window(current_time)); // Buy starts immediately
         assert!(lottery.is_in_buy_window(current_time + 12 * 60 * 60)); // within 24h buy window
@@ -569,6 +587,7 @@ mod tests {
             1000,
             Pubkey::default(),
             0,
+            500,
         );
 
         // Set up windows for testing
@@ -608,6 +627,7 @@ mod tests {
             1000,
             Pubkey::default(),
             0,
+            500,
         );
 
         // Set up windows and single participant

@@ -22,7 +22,8 @@ Notes:
   builds omit that feature.
 - Service charge updates are a local/staging operational feature behind
   `allow-service-charge-update`; production/mainnet builds keep the initialized
-  fee immutable.
+  fee immutable. Each lottery snapshots `service_charge_bps` at creation, so a
+  later config change cannot alter already-created payout math.
 - Winner finalization is chunked through a `FinalizationLedger` PDA. Ticket
   purchases are not capped by participant count; sorted participant chunks are
   submitted until aggregation and weighted winner selection complete.

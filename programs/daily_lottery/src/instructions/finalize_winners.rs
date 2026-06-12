@@ -170,7 +170,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         FINALIZATION_PHASE_SELECTING => process_selection_chunk(
             program_id,
             lottery_ai,
-            &config,
             &mut lottery,
             &mut finalization_ledger,
             &participant_accounts,
@@ -374,7 +373,6 @@ fn process_aggregation_chunk(
 fn process_selection_chunk(
     program_id: &Pubkey,
     lottery_ai: &AccountInfo,
-    config: &Config,
     lottery: &mut Lottery,
     finalization_ledger: &mut FinalizationLedger,
     participant_accounts: &[&AccountInfo],
@@ -437,13 +435,7 @@ fn process_selection_chunk(
         )?;
 
         if finalization_ledger.winners.len() == finalization_ledger.target_winners as usize {
-            complete_finalization(
-                config,
-                lottery_ai,
-                lottery,
-                finalization_ledger,
-                current_time,
-            )?;
+            complete_finalization(lottery_ai, lottery, finalization_ledger, current_time)?;
             completed = true;
         } else {
             finalization_ledger.current_round = finalization_ledger
@@ -469,13 +461,12 @@ fn process_selection_chunk(
 }
 
 fn complete_finalization(
-    config: &Config,
     lottery_ai: &AccountInfo,
     lottery: &mut Lottery,
     finalization_ledger: &mut FinalizationLedger,
     current_time: i64,
 ) -> Result<(), solana_program::program_error::ProgramError> {
-    let service_fee = compute_service_fee(lottery.total_funds, config.service_charge_bps)?;
+    let service_fee = compute_service_fee(lottery.total_funds, lottery.service_charge_bps)?;
     let winners_pool = lottery.total_funds.saturating_sub(service_fee);
     let winners_len = finalization_ledger.winners.len();
     if winners_len == 0 {

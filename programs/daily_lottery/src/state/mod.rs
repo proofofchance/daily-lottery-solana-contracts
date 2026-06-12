@@ -61,6 +61,7 @@ pub mod sizes {
     /// + winners_merkle_root[32] + winners_count[8] + total_payout[8]
     /// + paid_winners_bitmap[4+32] + settlement_batches_completed[4] + settlement_complete[1]
     /// + remediation_start_unix[8] + remediation_deadline_unix[8]
+    /// + service_charge_bps[2]
     pub const LOTTERY_SIZE: usize = 8
         + 8
         + 32
@@ -90,7 +91,8 @@ pub mod sizes {
         + 4
         + 1
         + 8
-        + 8;
+        + 8
+        + 2;
 
     /// Size of Participant account in bytes (discriminator + data)
     /// lottery[32] + wallet[32] + reveal_hash[32] + tickets[8] + attested[1]
