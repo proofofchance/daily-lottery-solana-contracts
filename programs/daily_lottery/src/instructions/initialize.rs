@@ -58,6 +58,9 @@ pub fn process(
     if !Config::validate_service_charge(service_charge_bps) {
         return Err(Error::InvalidServiceCharge.into());
     }
+    if !Config::validate_max_winners_cap(max_winners_cap) {
+        return Err(Error::InvalidInstruction.into());
+    }
 
     // Verify config PDA
     let config_seeds: &[&[u8]] = &[b"config"];

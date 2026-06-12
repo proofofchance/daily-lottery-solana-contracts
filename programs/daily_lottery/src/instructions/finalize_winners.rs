@@ -153,6 +153,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         authority_ai,
         system_program_ai,
         finalization_ledger_ai,
+        &config,
         &lottery,
         current_time,
     )?;
@@ -214,6 +215,7 @@ fn load_or_create_finalization_ledger<'a>(
     authority_ai: &AccountInfo<'a>,
     system_program_ai: &AccountInfo<'a>,
     finalization_ledger_ai: &AccountInfo<'a>,
+    config: &Config,
     lottery: &Lottery,
     current_time: i64,
 ) -> Result<FinalizationLedger, solana_program::program_error::ProgramError> {
@@ -222,11 +224,7 @@ fn load_or_create_finalization_ledger<'a>(
         return Err(Error::InvalidSeeds.into());
     }
 
-    let max_winners = if lottery.participants_count <= 1 {
-        1u64
-    } else {
-        (crate::state::sizes::MAX_WINNERS as u64).min(lottery.participants_count - 1)
-    };
+    let max_winners = config.effective_max_winners(lottery.participants_count);
 
     if finalization_ledger_ai.data_is_empty() {
         assert_pda_key(
@@ -337,7 +335,7 @@ fn process_aggregation_chunk(
         let selected_count = finalization_ledger
             .selected_winner_count(lottery.participants_count)
             .min(finalization_ledger.eligible_count)
-            .min(crate::state::sizes::MAX_WINNERS as u64);
+            .min(finalization_ledger.max_winners);
         if selected_count == 0 {
             return Err(Error::WinnerNotFound.into());
         }

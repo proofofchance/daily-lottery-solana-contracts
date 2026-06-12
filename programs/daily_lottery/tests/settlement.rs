@@ -52,6 +52,15 @@ fn setup_lottery(
     program_id: Pubkey,
     authority: &Keypair,
 ) -> (Pubkey, Pubkey, Pubkey, Pubkey) {
+    setup_lottery_with_max_winners_cap(ctx, program_id, authority, 32)
+}
+
+fn setup_lottery_with_max_winners_cap(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    authority: &Keypair,
+    max_winners_cap: u32,
+) -> (Pubkey, Pubkey, Pubkey, Pubkey) {
     let (config_pda, _) = Pubkey::find_program_address(&[b"config"], &program_id);
     let lottery_id = 1u64;
     let id_le = lottery_id.to_le_bytes();
@@ -72,7 +81,7 @@ fn setup_lottery(
         data: borsh::to_vec(&Instruction::Initialize {
             ticket_price_lamports: 1_000_000,
             service_charge_bps: 500,
-            max_winners_cap: 32,
+            max_winners_cap,
         })
         .unwrap(),
     };
@@ -161,6 +170,31 @@ fn attest_uploaded(
     proof_hash: [u8; 32],
     voted_number_of_winners: u64,
 ) {
+    attest_uploaded_result(
+        ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_pda,
+        participant,
+        authority,
+        proof_hash,
+        voted_number_of_winners,
+    )
+    .unwrap();
+}
+
+fn attest_uploaded_result(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    participant_pda: Pubkey,
+    participant: &Keypair,
+    authority: &Keypair,
+    proof_hash: [u8; 32],
+    voted_number_of_winners: u64,
+) -> litesvm::types::TransactionResult {
     let mut message = ATTESTATION_MESSAGE_DOMAIN_V2.to_vec();
     message.extend_from_slice(lottery_pda.as_ref());
     message.extend_from_slice(participant.pubkey().as_ref());
@@ -185,7 +219,7 @@ fn attest_uploaded(
         })
         .unwrap(),
     };
-    send_tx(ctx, vec![ed25519_ix, attest_ix], &[participant]).unwrap();
+    send_tx(ctx, vec![ed25519_ix, attest_ix], &[participant])
 }
 
 fn upload_reveals(
@@ -619,6 +653,75 @@ fn finalize_winners_selection_rejects_participant_missing_aggregation_inclusion(
     )
     .expect_err("selection should reject participants not included during aggregation");
     assert_custom_error(err, Error::InvalidAccountData as u32);
+}
+
+#[test]
+fn attest_uploaded_rejects_vote_above_configured_winner_cap() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer_a = Keypair::new();
+    let buyer_b = Keypair::new();
+    let buyer_c = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b, &buyer_c]);
+
+    let (config_pda, lottery_pda, vault_pda, _) =
+        setup_lottery_with_max_winners_cap(&mut ctx, program_id, &authority, 1);
+
+    let secret_a = b"cap-a";
+    let participant_a = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_a,
+        secret_a,
+        1,
+    );
+    buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_b,
+        b"cap-b",
+        1,
+    );
+    buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_c,
+        b"cap-c",
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+
+    let err = attest_uploaded_result(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_a,
+        &buyer_a,
+        &authority,
+        hash(secret_a).to_bytes(),
+        2,
+    )
+    .expect_err("vote above configured winner cap should fail");
+    assert_custom_error(err, Error::InvalidInstruction as u32);
 }
 
 #[test]

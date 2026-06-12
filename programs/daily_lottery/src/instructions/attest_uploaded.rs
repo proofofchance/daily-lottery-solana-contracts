@@ -131,11 +131,7 @@ pub fn process(
     if voted_number_of_winners == 0 {
         return Err(Error::InvalidInstruction.into());
     }
-    let max_winners = if lottery.participants_count <= 1 {
-        1
-    } else {
-        lottery.participants_count.saturating_sub(1)
-    };
+    let max_winners = config.effective_max_winners(lottery.participants_count);
     if voted_number_of_winners > max_winners {
         return Err(Error::InvalidInstruction.into());
     }

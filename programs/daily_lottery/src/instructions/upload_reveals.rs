@@ -159,14 +159,7 @@ pub fn process(
     }
 
     // Initialize or load the VoteTally PDA (tracks vote weights across batches)
-    let max_winners = if lottery.participants_count <= 1 {
-        1u64
-    } else {
-        std::cmp::min(
-            crate::state::sizes::MAX_WINNERS as u64,
-            lottery.participants_count.saturating_sub(1),
-        )
-    };
+    let max_winners = config.effective_max_winners(lottery.participants_count);
     let (expected_vote_tally, bump) = derive_vote_tally_pda(program_id, lottery_ai.key);
     if expected_vote_tally != *vote_tally_ai.key {
         return Err(Error::InvalidSeeds.into());
@@ -316,7 +309,7 @@ pub fn process(
         };
 
         let voted = participant.voted_winners();
-        if voted > 0 && voted <= lottery.participants_count.saturating_sub(1) {
+        if voted > 0 && voted <= max_winners {
             let weight = participant.tickets_bought as u128;
             vote_tally.add_vote(voted, weight, participant.attested_at_unix);
         }
