@@ -91,6 +91,7 @@ must verify the upgrade authority immediately after deployment.
 - Selection chunks only accept participants already included during aggregation.
 - Refund/cancel paths leave participant funds in the program vault until
   `ClaimRefund`.
-- Each lottery snapshots `service_charge_bps` at creation; finalization and
-  payout settlement must use the lottery snapshot, not mutable config.
+- Each lottery snapshots `ticket_price_lamports` and `service_charge_bps` at
+  creation; buy, refund, finalization, and payout settlement math must use the
+  lottery snapshots, not mutable config.
 - Production builds omit early-upload and service-charge-update features.

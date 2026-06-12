@@ -167,6 +167,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         *vault_ai.key,
         vault_bump,
         config.service_charge_bps,
+        config.ticket_price_lamports,
     );
 
     // Initialize vault data
@@ -192,6 +193,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         buy_start_unix: lottery.buy_start_unix,
         buy_deadline_unix: lottery.buy_deadline_unix,
         service_charge_bps: lottery.service_charge_bps,
+        ticket_price_lamports: lottery.ticket_price_lamports,
     };
     event.emit();
 

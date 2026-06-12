@@ -69,6 +69,7 @@ pub enum LotteryEvent {
         buy_start_unix: i64,
         buy_deadline_unix: i64,
         service_charge_bps: u16,
+        ticket_price_lamports: u64,
     },
 
     /// Emitted when tickets are purchased
@@ -463,6 +464,7 @@ mod tests {
             buy_start_unix: 1640995200,
             buy_deadline_unix: 1641081600,
             service_charge_bps: 500,
+            ticket_price_lamports: 1_000_000,
         };
 
         let wrapper = EventWrapper {

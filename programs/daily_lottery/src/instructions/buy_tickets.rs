@@ -66,7 +66,7 @@ pub fn process(
     require_key_match(system_program_ai, &system_program::id())?;
 
     // Read account data
-    let config: Config = read_account_data(config_ai)?;
+    let _config: Config = read_account_data(config_ai)?;
     let mut lottery: Lottery = read_account_data(lottery_ai)?;
     let _vault: Vault = read_account_data(vault_ai)?;
 
@@ -107,7 +107,7 @@ pub fn process(
     }
 
     // Calculate payment
-    let total_cost = config
+    let total_cost = lottery
         .ticket_price_lamports
         .checked_mul(number_of_tickets)
         .ok_or(Error::MathOverflow)?;

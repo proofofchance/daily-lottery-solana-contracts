@@ -45,7 +45,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     require_writable(wallet_ai)?;
     require_signer(wallet_ai)?;
 
-    let config: Config = read_account_data(config_ai)?;
+    let _config: Config = read_account_data(config_ai)?;
     let lottery: Lottery = read_account_data(lottery_ai)?;
     let _vault: Vault = read_account_data(vault_ai)?;
     let mut participant: Participant = read_account_data(participant_ai)?;
@@ -89,7 +89,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         return Err(Error::RefundAlreadyClaimed.into());
     }
 
-    let refund_amount = config
+    let refund_amount = lottery
         .ticket_price_lamports
         .checked_mul(participant.tickets_bought)
         .ok_or(Error::MathOverflow)?;
