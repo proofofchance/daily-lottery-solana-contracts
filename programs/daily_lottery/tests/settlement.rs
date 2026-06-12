@@ -2,7 +2,7 @@
 
 mod common;
 
-use borsh::BorshDeserialize;
+use borsh::{BorshDeserialize, BorshSerialize};
 use common::{assert_custom_error, TestContext};
 use daily_lottery::{
     error::Error,
@@ -243,6 +243,14 @@ fn claim_refund(
 fn load_lottery(ctx: &mut TestContext, lottery_pda: Pubkey) -> Lottery {
     let lot_acc = ctx.get_account(lottery_pda).unwrap();
     read_after_disc(&lot_acc.data)
+}
+
+fn store_participant(ctx: &mut TestContext, participant_pda: Pubkey, participant: &Participant) {
+    let mut account = ctx.get_account(participant_pda).unwrap();
+    participant
+        .serialize(&mut &mut account.data[8..])
+        .expect("participant should serialize into existing account");
+    ctx.set_account(participant_pda, account);
 }
 
 fn force_clock_after_upload_deadline(ctx: &mut TestContext, lottery_pda: Pubkey) {
@@ -486,6 +494,131 @@ fn finalize_winners_sets_fields() {
     assert!(lot.winners_merkle_root.iter().any(|&b| b != 0));
     assert!(lot.total_payout > 0);
     assert!(lot.settlement_start_unix > 0);
+}
+
+#[test]
+fn finalize_winners_selection_rejects_participant_missing_aggregation_inclusion() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer_a = Keypair::new();
+    let buyer_b = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
+
+    let (config_pda, lottery_pda, vault_pda, vote_tally_pda) =
+        setup_lottery(&mut ctx, program_id, &authority);
+
+    let secret_a = b"selection-aggregation-a";
+    let secret_b = b"selection-aggregation-b";
+    let proof_hash_a = hash(secret_a).to_bytes();
+    let proof_hash_b = hash(secret_b).to_bytes();
+
+    let participant_a = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_a,
+        secret_a,
+        1,
+    );
+    let participant_b = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_b,
+        secret_b,
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+
+    attest_uploaded(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_a,
+        &buyer_a,
+        &authority,
+        proof_hash_a,
+        1,
+    );
+    attest_uploaded(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_b,
+        &buyer_b,
+        &authority,
+        proof_hash_b,
+        1,
+    );
+
+    upload_reveals(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        vote_tally_pda,
+        vec![
+            (participant_a, secret_a.to_vec()),
+            (participant_b, secret_b.to_vec()),
+        ],
+        vec![participant_a, participant_b],
+    );
+    force_clock_after_upload_deadline(&mut ctx, lottery_pda);
+
+    let sorted_participants =
+        sorted_participants_by_wallet(&mut ctx, &[participant_a, participant_b]);
+    finalize_winners_chunk(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &sorted_participants,
+    )
+    .unwrap();
+
+    let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
+    let ledger = load_finalization_ledger(&mut ctx, finalization_ledger).unwrap();
+    assert_eq!(ledger.phase, FINALIZATION_PHASE_SELECTING);
+
+    let corrupted_participant_pda = sorted_participants[0];
+    let participant_account = ctx.get_account(corrupted_participant_pda).unwrap();
+    let mut participant: Participant = read_after_disc(&participant_account.data);
+    assert!(participant.reveal_included());
+    assert!(participant.settlement_included());
+    participant.voted_number_of_winners = participant.voted_winners();
+    participant.mark_reveal_included();
+    assert!(!participant.settlement_included());
+    store_participant(&mut ctx, corrupted_participant_pda, &participant);
+
+    let err = finalize_winners_chunk(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[corrupted_participant_pda],
+    )
+    .expect_err("selection should reject participants not included during aggregation");
+    assert_custom_error(err, Error::InvalidAccountData as u32);
 }
 
 #[test]

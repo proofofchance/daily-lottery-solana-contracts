@@ -388,7 +388,10 @@ fn process_selection_chunk(
         let participant = read_valid_participant(program_id, lottery_ai, participant_ai)?;
         require_sorted_wallet(finalization_ledger, &participant.wallet)?;
 
-        if !participant.reveal_included() || participant.tickets_bought == 0 {
+        if !participant.reveal_included()
+            || !participant.settlement_included()
+            || participant.tickets_bought == 0
+        {
             return Err(Error::InvalidAccountData.into());
         }
 
