@@ -28,6 +28,8 @@ Notes:
 - Winner finalization is chunked through a `FinalizationLedger` PDA. Ticket
   purchases are not capped by participant count; sorted participant chunks are
   submitted until aggregation and weighted winner selection complete.
+- Winner finalization rejects any selected winner set that would pay less than
+  one lamport per winner.
 - Lottery accounts include an explicit layout version and reserved bytes so
   future controlled upgrades can add fields without immediately changing the
   serialized account size.

@@ -472,6 +472,9 @@ fn complete_finalization(
     if winners_len == 0 {
         return Err(Error::WinnerNotFound.into());
     }
+    if winners_pool < winners_len as u64 {
+        return Err(Error::InsufficientFunds.into());
+    }
 
     let per_winner_payout = winners_pool / (winners_len as u64);
     let total_winners_payout = per_winner_payout
@@ -690,6 +693,7 @@ fn phase_name(phase: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_program::account_info::AccountInfo;
     use solana_program::pubkey::Pubkey;
 
     #[test]
@@ -732,5 +736,42 @@ mod tests {
         require_sorted_wallet(&mut ledger, &wallet_b).unwrap();
         assert!(require_sorted_wallet(&mut ledger, &wallet_b).is_err());
         assert!(require_sorted_wallet(&mut ledger, &wallet_a).is_err());
+    }
+
+    #[test]
+    fn complete_finalization_rejects_zero_lamport_winners() {
+        let key = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let lottery_ai =
+            AccountInfo::new(&key, false, false, &mut lamports, &mut data, &owner, false);
+        let mut lottery = Lottery::new(
+            1,
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            100,
+            Pubkey::new_unique(),
+            255,
+            0,
+            1,
+        );
+        lottery.total_funds = 1;
+        lottery.participants_count = 3;
+        lottery.provider_uploaded_count = 3;
+        let mut ledger = FinalizationLedger::new(key, 2, 100);
+        ledger.total_eligible_tickets = 3;
+        ledger.target_winners = 2;
+        ledger
+            .push_winner(Pubkey::new_unique(), 1)
+            .expect("first winner");
+        ledger
+            .push_winner(Pubkey::new_unique(), 1)
+            .expect("second winner");
+
+        assert_eq!(
+            complete_finalization(&lottery_ai, &mut lottery, &mut ledger, 200),
+            Err(Error::InsufficientFunds.into())
+        );
     }
 }
