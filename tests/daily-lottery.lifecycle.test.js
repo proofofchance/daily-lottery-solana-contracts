@@ -96,6 +96,8 @@ const LOTTERY_SCHEMA = new Map([
         ["remediation_deadline_unix", "i64"],
         ["service_charge_bps", "u16"],
         ["ticket_price_lamports", "u64"],
+        ["account_version", "u16"],
+        ["reserved", [126]],
       ],
     },
   ],

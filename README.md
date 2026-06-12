@@ -28,6 +28,9 @@ Notes:
 - Winner finalization is chunked through a `FinalizationLedger` PDA. Ticket
   purchases are not capped by participant count; sorted participant chunks are
   submitted until aggregation and weighted winner selection complete.
+- Lottery accounts include an explicit layout version and reserved bytes so
+  future controlled upgrades can add fields without immediately changing the
+  serialized account size.
 - Multiple lotteries may be active concurrently; operational commands should target
   an explicit lottery ID when settling or paying winners.
 - Single-participant lotteries auto-complete upload when the upload/attestation

@@ -18,6 +18,9 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::pubkey::Pubkey;
 
+/// Current serialized Lottery account layout version.
+pub const LOTTERY_ACCOUNT_VERSION: u16 = 1;
+
 /// Status of a lottery instance (kept minimal; phases derived from timers)
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[borsh(use_discriminant = true)]
@@ -58,7 +61,7 @@ impl From<LotteryStatus> for u8 {
 /// 2. Upload window opens; participants upload PoC to provider and vote-and-attest on-chain
 /// 3. Settlement begins after upload window (or when all have attested); provider uploads PoCs in batches
 /// 4. Lottery is settled using deterministic reveal-plaintext draw from reveal-included commitments
-#[derive(BorshSerialize, BorshDeserialize, Debug, Default, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct Lottery {
     /// Unique lottery ID (sequential, starting from 1)
     pub id: u64,
@@ -150,6 +153,52 @@ pub struct Lottery {
 
     /// Ticket price in lamports snapshotted when this lottery was created.
     pub ticket_price_lamports: u64,
+
+    /// Serialized account layout version for controlled upgrades.
+    pub account_version: u16,
+
+    /// Reserved bytes for future layout-compatible protocol upgrades.
+    pub reserved: [u8; 126],
+}
+
+impl Default for Lottery {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            config: Pubkey::default(),
+            authority: Pubkey::default(),
+            created_at_unix: 0,
+            buy_start_unix: 0,
+            buy_deadline_unix: 0,
+            upload_start_unix: 0,
+            upload_deadline_unix: 0,
+            settlement_start_unix: 0,
+            status: LotteryStatus::default().into(),
+            total_tickets: 0,
+            total_funds: 0,
+            provider_uploaded_count: 0,
+            poc_aggregate_hash: [0; 32],
+            uploads_complete: false,
+            settled: false,
+            vault: Pubkey::default(),
+            vault_bump: 0,
+            attested_count: 0,
+            participants_count: 0,
+            selected_number_of_winners: 0,
+            winners_merkle_root: [0; 32],
+            winners_count: 0,
+            total_payout: 0,
+            paid_winners_bitmap: Vec::new(),
+            settlement_batches_completed: 0,
+            settlement_complete: false,
+            remediation_start_unix: 0,
+            remediation_deadline_unix: 0,
+            service_charge_bps: 0,
+            ticket_price_lamports: 0,
+            account_version: 0,
+            reserved: [0; 126],
+        }
+    }
 }
 
 impl Lottery {
@@ -202,6 +251,8 @@ impl Lottery {
             remediation_deadline_unix: 0,
             service_charge_bps,
             ticket_price_lamports,
+            account_version: LOTTERY_ACCOUNT_VERSION,
+            reserved: [0; 126],
         }
     }
 
@@ -533,6 +584,8 @@ mod tests {
         assert_eq!(lottery.vault_bump, 255);
         assert_eq!(lottery.service_charge_bps, 500);
         assert_eq!(lottery.ticket_price_lamports, 1_000_000);
+        assert_eq!(lottery.account_version, LOTTERY_ACCOUNT_VERSION);
+        assert_eq!(lottery.reserved, [0; 126]);
         assert!(lottery.is_active());
         assert!(!lottery.settled);
     }

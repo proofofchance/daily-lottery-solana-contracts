@@ -94,4 +94,6 @@ must verify the upgrade authority immediately after deployment.
 - Each lottery snapshots `ticket_price_lamports` and `service_charge_bps` at
   creation; buy, refund, finalization, and payout settlement math must use the
   lottery snapshots, not mutable config.
+- Lottery accounts include an explicit layout version and reserved tail bytes
+  before the first production deployment.
 - Production builds omit early-upload and service-charge-update features.
