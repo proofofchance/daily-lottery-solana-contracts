@@ -148,8 +148,8 @@ pub enum Error {
     #[error("Invalid phase transition")]
     InvalidPhaseTransition,
 
-    /// The participant limit for one-transaction settlement has been reached
-    #[error("Participant limit reached")]
+    /// Legacy error code retained so existing custom error numbers do not shift.
+    #[error("Legacy participant limit reached")]
     ParticipantLimitReached,
 
     /// Refunds are unavailable for the current lottery state

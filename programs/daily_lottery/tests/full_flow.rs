@@ -9,12 +9,68 @@ use solana_keypair::Keypair;
 use solana_program::{pubkey::Pubkey, sysvar};
 use solana_sha256_hasher::hash;
 use solana_signer::Signer;
-use solana_system_interface::program as system_program;
+use solana_system_interface::{instruction as system_instruction, program as system_program};
 use std::io::Cursor;
 
 fn read_after_disc<T: BorshDeserialize>(data: &[u8]) -> T {
     let mut cursor = Cursor::new(&data[8..]);
     T::deserialize_reader(&mut cursor).unwrap()
+}
+
+fn finalization_ledger_pda(program_id: &Pubkey, lottery_pda: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"finalization_ledger", lottery_pda.as_ref()], program_id).0
+}
+
+fn sorted_participants_by_wallet(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
+    let mut keyed = participants
+        .iter()
+        .map(|participant_pda| {
+            let account = ctx.get_account(*participant_pda).unwrap();
+            let participant: Participant = read_after_disc(&account.data);
+            (participant.wallet, *participant_pda)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by(|left, right| left.0.to_bytes().cmp(&right.0.to_bytes()));
+    keyed
+        .into_iter()
+        .map(|(_, participant)| participant)
+        .collect()
+}
+
+fn finalize_winners_once(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    vault_pda: Pubkey,
+    authority: &Keypair,
+    participant_accounts: &[Pubkey],
+) {
+    let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
+    let mut accounts = vec![
+        AccountMeta::new(config_pda, false),
+        AccountMeta::new(lottery_pda, false),
+        AccountMeta::new(vault_pda, false),
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new(finalization_ledger, false),
+    ];
+    for participant in participant_accounts {
+        accounts.push(AccountMeta::new(*participant, false));
+    }
+    let ix = SdkIx {
+        program_id,
+        accounts,
+        data: to_vec(&Instruction::FinalizeWinners).unwrap(),
+    };
+    let next_slot = ctx.get_clock().slot.saturating_add(1);
+    ctx.warp_to_slot(next_slot);
+    let nonce_ix = system_instruction::transfer(
+        &ctx.payer.pubkey(),
+        &authority.pubkey(),
+        (next_slot % 9).saturating_add(1),
+    );
+    ctx.send_tx(vec![nonce_ix, ix], &[authority]).unwrap();
 }
 
 const ATTESTATION_MESSAGE_DOMAIN_V2: &[u8] = &[
@@ -206,19 +262,26 @@ fn full_flow_attest_upload_settle() {
 
     ctx.warp_to_slot(200_000);
 
-    let finalize_ix = SdkIx {
+    let sorted_participants = sorted_participants_by_wallet(&mut ctx, &[part_a_pda, part_b_pda]);
+    assert_eq!(sorted_participants.len(), 2);
+    finalize_winners_once(
+        &mut ctx,
         program_id,
-        accounts: vec![
-            AccountMeta::new(config_pda, false),
-            AccountMeta::new(lottery_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new_readonly(authority.pubkey(), true),
-            AccountMeta::new(part_a_pda, false),
-            AccountMeta::new(part_b_pda, false),
-        ],
-        data: to_vec(&Instruction::FinalizeWinners).unwrap(),
-    };
-    ctx.send_tx(vec![finalize_ix], &[&authority]).unwrap();
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &sorted_participants,
+    );
+    finalize_winners_once(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &sorted_participants,
+    );
 
     let lot_account = ctx.get_account(lottery_pda).unwrap();
     let lot: Lottery = read_after_disc(&lot_account.data);

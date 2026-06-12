@@ -5,7 +5,7 @@
 use crate::{
     error::Error,
     events::LotteryEvent,
-    state::{sizes::MAX_SETTLEMENT_PARTICIPANTS, Config, Lottery, Participant, Vault},
+    state::{Config, Lottery, Participant, Vault},
     utils::{
         account::{read_account_data, write_account_data},
         pda::{assert_pda_owned, derive_participant_pda},
@@ -130,10 +130,6 @@ pub fn process(
 
         existing
     } else {
-        if lottery.participants_count >= MAX_SETTLEMENT_PARTICIPANTS {
-            return Err(Error::ParticipantLimitReached.into());
-        }
-
         // Create new participant account
         let rent = Rent::get()?;
         let participant_space = crate::state::sizes::PARTICIPANT_SIZE;

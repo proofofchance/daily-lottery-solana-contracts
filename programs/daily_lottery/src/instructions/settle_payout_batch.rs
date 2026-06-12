@@ -57,21 +57,6 @@ pub fn process(
     // Remaining accounts are winner recipient wallets
     let recipient_accounts: Vec<&AccountInfo> = account_info_iter.collect();
 
-    // DEBUG: log core accounts and lengths to diagnose PDA issues at runtime
-    solana_program::msg!(
-        "PAYOUT dbg: accounts cfg={} lot={} vault={} auth={}",
-        config_ai.key,
-        lottery_ai.key,
-        vault_ai.key,
-        authority_ai.key
-    );
-    solana_program::msg!(
-        "PAYOUT dbg: data_len cfg={} lot={} vault={}",
-        config_ai.data.borrow().len(),
-        lottery_ai.data.borrow().len(),
-        vault_ai.data.borrow().len()
-    );
-
     // Validate accounts
     assert_pda_owned(program_id, config_ai, &[b"config"])?;
     require_writable(lottery_ai)?;
@@ -87,13 +72,6 @@ pub fn process(
 
     // Ensure WinnersLedger exists and matches PDA; create if missing
     let (expected_ledger_pda, ledger_bump) = derive_winners_ledger_pda(program_id, lottery_ai.key);
-    solana_program::msg!(
-        "PAYOUT dbg: winners_ledger passed={} expected={} owner={} empty={}",
-        winners_ledger_ai.key,
-        expected_ledger_pda,
-        winners_ledger_ai.owner,
-        winners_ledger_ai.data_is_empty()
-    );
     if &expected_ledger_pda != winners_ledger_ai.key {
         return Err(Error::InvalidSeeds.into());
     }
@@ -118,11 +96,6 @@ pub fn process(
             &[&[b"winners_ledger", lottery_ai.key.as_ref(), &[ledger_bump]]],
         )
         .map_err(|_| Error::InvalidInstruction)?;
-        solana_program::msg!(
-            "PAYOUT dbg: winners_ledger created space={} lamports={}",
-            ledger_space,
-            lamports
-        );
         // Initialize content
         let ledger = WinnersLedger {
             lottery: *lottery_ai.key,
@@ -131,7 +104,6 @@ pub fn process(
             settlement_batches_completed: 0,
         };
         write_account_data(winners_ledger_ai, "WinnersLedger", &ledger)?;
-        solana_program::msg!("PAYOUT dbg: winners_ledger initialized");
     } else {
         // Existing ledger must be owned by this program
         if winners_ledger_ai.owner != program_id {
@@ -259,10 +231,12 @@ pub fn process(
             let vault_lamports_ref = &mut **vault_ai.try_borrow_mut_lamports()?;
             let authority_lamports_ref = &mut **authority_ai.try_borrow_mut_lamports()?;
 
-            if *vault_lamports_ref >= service_fee {
-                *vault_lamports_ref = vault_lamports_ref.saturating_sub(service_fee);
-                *authority_lamports_ref = authority_lamports_ref.saturating_add(service_fee);
+            if *vault_lamports_ref < service_fee {
+                return Err(Error::InsufficientFunds.into());
             }
+
+            *vault_lamports_ref = vault_lamports_ref.saturating_sub(service_fee);
+            *authority_lamports_ref = authority_lamports_ref.saturating_add(service_fee);
         }
 
         // Transfer any remainder to authority (from division rounding)
@@ -270,10 +244,12 @@ pub fn process(
             let vault_lamports_ref = &mut **vault_ai.try_borrow_mut_lamports()?;
             let authority_lamports_ref = &mut **authority_ai.try_borrow_mut_lamports()?;
 
-            if *vault_lamports_ref >= payout_remainder {
-                *vault_lamports_ref = vault_lamports_ref.saturating_sub(payout_remainder);
-                *authority_lamports_ref = authority_lamports_ref.saturating_add(payout_remainder);
+            if *vault_lamports_ref < payout_remainder {
+                return Err(Error::InsufficientFunds.into());
             }
+
+            *vault_lamports_ref = vault_lamports_ref.saturating_sub(payout_remainder);
+            *authority_lamports_ref = authority_lamports_ref.saturating_add(payout_remainder);
         }
 
         // Close vault and reclaim rent to authority

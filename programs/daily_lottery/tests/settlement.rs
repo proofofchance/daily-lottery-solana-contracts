@@ -4,14 +4,22 @@ mod common;
 
 use borsh::BorshDeserialize;
 use common::{assert_custom_error, TestContext};
-use daily_lottery::{error::Error, instructions::settle_payout_batch::WinnerProof, *};
+use daily_lottery::{
+    error::Error,
+    instructions::settle_payout_batch::WinnerProof,
+    state::{
+        FinalizationLedger, FINALIZATION_PHASE_AGGREGATING, FINALIZATION_PHASE_COMPLETED,
+        FINALIZATION_PHASE_SELECTING,
+    },
+    *,
+};
 use solana_ed25519_program::new_ed25519_instruction_with_signature;
 use solana_instruction::{AccountMeta, Instruction as SdkIx};
 use solana_keypair::Keypair;
 use solana_program::{clock::Clock, pubkey::Pubkey, sysvar};
 use solana_sha256_hasher::hash;
 use solana_signer::Signer;
-use solana_system_interface::program as system_program;
+use solana_system_interface::{instruction as system_instruction, program as system_program};
 use std::io::Cursor;
 
 fn read_after_disc<T: BorshDeserialize>(data: &[u8]) -> T {
@@ -248,6 +256,135 @@ fn force_clock_after_upload_deadline(ctx: &mut TestContext, lottery_pda: Pubkey)
     assert!(updated_clock.unix_timestamp > lot.upload_deadline_unix);
 }
 
+fn finalization_ledger_pda(program_id: &Pubkey, lottery_pda: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"finalization_ledger", lottery_pda.as_ref()], program_id).0
+}
+
+fn load_finalization_ledger(
+    ctx: &mut TestContext,
+    finalization_ledger_pda: Pubkey,
+) -> Option<FinalizationLedger> {
+    let account = ctx.get_account(finalization_ledger_pda)?;
+    if account.data.is_empty() {
+        return None;
+    }
+    Some(read_after_disc(&account.data))
+}
+
+fn sorted_participants_by_wallet(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
+    let mut keyed = participants
+        .iter()
+        .map(|participant_pda| {
+            let account = ctx.get_account(*participant_pda).unwrap();
+            let participant: Participant = read_after_disc(&account.data);
+            (participant.wallet, *participant_pda)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by(|left, right| left.0.to_bytes().cmp(&right.0.to_bytes()));
+    keyed
+        .into_iter()
+        .map(|(_, participant)| participant)
+        .collect()
+}
+
+fn finalize_winners_chunk(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    vault_pda: Pubkey,
+    authority: &Keypair,
+    participant_accounts: &[Pubkey],
+) -> litesvm::types::TransactionResult {
+    let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
+    let mut accounts = vec![
+        AccountMeta::new(config_pda, false),
+        AccountMeta::new(lottery_pda, false),
+        AccountMeta::new(vault_pda, false),
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new(finalization_ledger, false),
+    ];
+    for participant in participant_accounts {
+        accounts.push(AccountMeta::new(*participant, false));
+    }
+
+    let ix = SdkIx {
+        program_id,
+        accounts,
+        data: borsh::to_vec(&Instruction::FinalizeWinners).unwrap(),
+    };
+    let next_slot = ctx.get_clock().slot.saturating_add(1);
+    ctx.warp_to_slot(next_slot);
+    let nonce_ix = system_instruction::transfer(
+        &ctx.payer.pubkey(),
+        &authority.pubkey(),
+        (next_slot % 9).saturating_add(1),
+    );
+    send_tx(ctx, vec![nonce_ix, ix], &[authority])
+}
+
+fn finalize_winners_until_complete(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    vault_pda: Pubkey,
+    authority: &Keypair,
+    participants: &[Pubkey],
+    chunk_size: usize,
+) {
+    let sorted_participants = sorted_participants_by_wallet(ctx, participants);
+    let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
+    let mut iterations = 0usize;
+    loop {
+        let lot = load_lottery(ctx, lottery_pda);
+        if lot.winners_count > 0 && lot.winners_merkle_root != [0u8; 32] {
+            return;
+        }
+        iterations += 1;
+        assert!(
+            iterations <= sorted_participants.len().saturating_mul(260).max(4),
+            "chunked finalization did not complete"
+        );
+
+        let ledger = load_finalization_ledger(ctx, finalization_ledger);
+        let (start, required) = match ledger.as_ref().map(|ledger| ledger.phase) {
+            None | Some(FINALIZATION_PHASE_AGGREGATING) => (
+                ledger
+                    .as_ref()
+                    .map(|ledger| ledger.processed_count as usize)
+                    .unwrap_or(0),
+                sorted_participants.len(),
+            ),
+            Some(FINALIZATION_PHASE_SELECTING) => {
+                let ledger = ledger.as_ref().unwrap();
+                (
+                    ledger.round_processed_count as usize,
+                    ledger.eligible_count as usize,
+                )
+            }
+            Some(FINALIZATION_PHASE_COMPLETED) => return,
+            _ => panic!("unexpected finalization phase"),
+        };
+        assert!(
+            start < required,
+            "finalization cursor exceeded required count"
+        );
+        let end = (start + chunk_size.max(1)).min(required);
+        finalize_winners_chunk(
+            ctx,
+            program_id,
+            config_pda,
+            lottery_pda,
+            vault_pda,
+            authority,
+            &sorted_participants[start..end],
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn finalize_winners_sets_fields() {
     let program_id = Pubkey::new_unique();
@@ -333,19 +470,16 @@ fn finalize_winners_sets_fields() {
     );
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
-    let finalize_ix = SdkIx {
+    finalize_winners_until_complete(
+        &mut ctx,
         program_id,
-        accounts: vec![
-            AccountMeta::new(config_pda, false),
-            AccountMeta::new(lottery_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new_readonly(authority.pubkey(), true),
-            AccountMeta::new(participant_a, false),
-            AccountMeta::new(participant_b, false),
-        ],
-        data: borsh::to_vec(&Instruction::FinalizeWinners).unwrap(),
-    };
-    send_tx(&mut ctx, vec![finalize_ix], &[&authority]).unwrap();
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_a, participant_b],
+        2,
+    );
 
     let lot = load_lottery(&mut ctx, lottery_pda);
     assert_eq!(lot.winners_count, 1);
@@ -385,20 +519,16 @@ fn finalize_winners_no_attesters_is_rejected() {
         2,
     );
 
-    let finalize_ix = SdkIx {
+    let err = finalize_winners_chunk(
+        &mut ctx,
         program_id,
-        accounts: vec![
-            AccountMeta::new(config_pda, false),
-            AccountMeta::new(lottery_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new_readonly(authority.pubkey(), true),
-            AccountMeta::new(participant_a, false),
-            AccountMeta::new(participant_b, false),
-        ],
-        data: borsh::to_vec(&Instruction::FinalizeWinners).unwrap(),
-    };
-    let err = send_tx(&mut ctx, vec![finalize_ix], &[&authority])
-        .expect_err("FinalizeWinners should fail when attested_count is zero");
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_a, participant_b],
+    )
+    .expect_err("FinalizeWinners should fail when attested_count is zero");
     assert_custom_error(err, Error::NoAttestedParticipants as u32);
 }
 
@@ -632,23 +762,26 @@ fn finalize_no_attesters_refund_path_still_works() {
 }
 
 #[test]
-fn participant_cap_rejects_new_participants_before_settlement_becomes_unfinalizable() {
+fn participants_above_legacy_cap_can_finalize_in_chunks() {
     let program_id = Pubkey::new_unique();
     let authority = Keypair::new();
-    let participant_cap = daily_lottery::state::sizes::MAX_SETTLEMENT_PARTICIPANTS as usize;
-    let buyers = (0..=participant_cap)
+    let participant_count = 64usize;
+    let buyers = (0..participant_count)
         .map(|_| Keypair::new())
         .collect::<Vec<_>>();
-    let mut funded_accounts = Vec::with_capacity(participant_cap + 2);
+    let mut funded_accounts = Vec::with_capacity(participant_count + 1);
     funded_accounts.push(&authority);
     funded_accounts.extend(buyers.iter());
     let mut ctx = TestContext::new(program_id, &funded_accounts);
 
-    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+    let (config_pda, lottery_pda, vault_pda, vote_tally_pda) =
+        setup_lottery(&mut ctx, program_id, &authority);
 
-    for (index, buyer) in buyers.iter().take(participant_cap).enumerate() {
-        let secret = format!("cap-participant-{index}");
-        buy_tickets(
+    let mut participants = Vec::with_capacity(participant_count);
+    let mut secrets = Vec::with_capacity(participant_count);
+    for (index, buyer) in buyers.iter().enumerate() {
+        let secret = format!("scalable-participant-{index}");
+        let participant = buy_tickets(
             &mut ctx,
             program_id,
             config_pda,
@@ -658,36 +791,79 @@ fn participant_cap_rejects_new_participants_before_settlement_becomes_unfinaliza
             secret.as_bytes(),
             1,
         );
+        participants.push(participant);
+        secrets.push(secret.into_bytes());
     }
 
-    let overflow_buyer = &buyers[participant_cap];
-    let overflow_participant = participant_pda(&program_id, &lottery_pda, &overflow_buyer.pubkey());
-    let overflow_secret = b"cap-overflow";
-    let overflow_ix = SdkIx {
+    begin_reveal_now(
+        &mut ctx,
         program_id,
-        accounts: vec![
-            AccountMeta::new(config_pda, false),
-            AccountMeta::new(lottery_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new(overflow_participant, false),
-            AccountMeta::new(overflow_buyer.pubkey(), true),
-            AccountMeta::new_readonly(system_program::id(), false),
-        ],
-        data: borsh::to_vec(&Instruction::BuyTickets {
-            proof_of_chance_hash: Some(hash(overflow_secret).to_bytes()),
-            number_of_tickets: 1,
-        })
-        .unwrap(),
-    };
-    let err = send_tx(&mut ctx, vec![overflow_ix], &[overflow_buyer])
-        .expect_err("new participants beyond the cap should be rejected");
-    assert_custom_error(err, Error::ParticipantLimitReached as u32);
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+
+    for ((buyer, participant), secret) in buyers.iter().zip(participants.iter()).zip(secrets.iter())
+    {
+        attest_uploaded(
+            &mut ctx,
+            program_id,
+            config_pda,
+            lottery_pda,
+            *participant,
+            buyer,
+            &authority,
+            hash(secret).to_bytes(),
+            1,
+        );
+    }
+
+    for chunk in participants
+        .iter()
+        .copied()
+        .zip(secrets.iter().cloned())
+        .collect::<Vec<_>>()
+        .chunks(4)
+    {
+        let entries = chunk
+            .iter()
+            .map(|(participant, secret)| (*participant, secret.clone()))
+            .collect::<Vec<_>>();
+        let accounts = chunk
+            .iter()
+            .map(|(participant, _)| *participant)
+            .collect::<Vec<_>>();
+        upload_reveals(
+            &mut ctx,
+            program_id,
+            config_pda,
+            lottery_pda,
+            &authority,
+            vote_tally_pda,
+            entries,
+            accounts,
+        );
+    }
+
+    force_clock_after_upload_deadline(&mut ctx, lottery_pda);
+    finalize_winners_until_complete(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &participants,
+        2,
+    );
 
     let lot = load_lottery(&mut ctx, lottery_pda);
-    assert_eq!(
-        lot.participants_count,
-        daily_lottery::state::sizes::MAX_SETTLEMENT_PARTICIPANTS
-    );
+    assert_eq!(lot.participants_count, participant_count as u64);
+    assert_eq!(lot.provider_uploaded_count, participant_count as u64);
+    assert_eq!(lot.winners_count, 1);
+    assert_ne!(lot.winners_merkle_root, [0u8; 32]);
 }
 
 #[test]
@@ -760,19 +936,16 @@ fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
     assert!(lot.uploads_complete);
     assert!(lot.settlement_start_unix > 0);
 
-    let finalize_ix = SdkIx {
+    finalize_winners_until_complete(
+        &mut ctx,
         program_id,
-        accounts: vec![
-            AccountMeta::new(config_pda, false),
-            AccountMeta::new(lottery_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new_readonly(authority.pubkey(), true),
-            AccountMeta::new(participant_a, false),
-            AccountMeta::new(participant_b, false),
-        ],
-        data: borsh::to_vec(&Instruction::FinalizeWinners).unwrap(),
-    };
-    send_tx(&mut ctx, vec![finalize_ix], &[&authority]).unwrap();
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_a, participant_b],
+        2,
+    );
 
     let finalized = load_lottery(&mut ctx, lottery_pda);
     assert_eq!(finalized.winners_count, 1);
@@ -863,19 +1036,16 @@ fn settle_batch_with_invalid_proof_fails() {
         vec![participant_a, participant_b],
     );
 
-    let finalize_ix = SdkIx {
+    finalize_winners_until_complete(
+        &mut ctx,
         program_id,
-        accounts: vec![
-            AccountMeta::new(config_pda, false),
-            AccountMeta::new(lottery_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new_readonly(authority.pubkey(), true),
-            AccountMeta::new(participant_a, false),
-            AccountMeta::new(participant_b, false),
-        ],
-        data: borsh::to_vec(&Instruction::FinalizeWinners).unwrap(),
-    };
-    send_tx(&mut ctx, vec![finalize_ix], &[&authority]).unwrap();
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_a, participant_b],
+        2,
+    );
 
     let lot = load_lottery(&mut ctx, lottery_pda);
     assert!(lot.winners_count > 0);

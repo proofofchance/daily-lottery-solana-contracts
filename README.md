@@ -19,9 +19,9 @@ Notes:
 - Service charge updates are a local/staging operational feature behind
   `allow-service-charge-update`; production/mainnet builds keep the initialized
   fee immutable.
-- New ticket purchases are capped by `MAX_SETTLEMENT_PARTICIPANTS` so winner
-  finalization can still fit every participant account in one Solana
-  transaction.
+- Winner finalization is chunked through a `FinalizationLedger` PDA. Ticket
+  purchases are not capped by participant count; sorted participant chunks are
+  submitted until aggregation and weighted winner selection complete.
 - Multiple lotteries may be active concurrently; operational commands should target
   an explicit lottery ID when settling or paying winners.
 - Single-participant lotteries auto-complete upload when the upload/attestation

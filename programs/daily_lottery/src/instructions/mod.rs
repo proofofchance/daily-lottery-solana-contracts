@@ -196,18 +196,20 @@ pub enum Instruction {
         upload_secs: u32,
     },
 
-    /// Finalize winners and store merkle commitment
+    /// Finalize winners and store merkle commitment in chunks
     ///
-    /// Determines winners using uploaded reveals and stores the merkle root
-    /// on-chain for batch settlement verification.
+    /// Aggregates reveal-included participants into a FinalizationLedger, then
+    /// scans sorted participant chunks once per weighted draw round. Stores the
+    /// final winners merkle root on-chain for batch settlement verification.
     ///
     /// Accounts expected:
     /// 0. `[]` Config account
     /// 1. `[writable]` Lottery account
     /// 2. `[writable]` Vault account
-    /// 3. `[signer]` Authority
-    /// 4. `[]` System program (for potential realloc funding)
-    ///    5..N. `[]` All participant accounts (for winner determination)
+    /// 3. `[writable, signer]` Authority
+    /// 4. `[]` System program
+    /// 5. `[writable]` FinalizationLedger PDA (`["finalization_ledger", lottery]`)
+    ///    6..N. `[writable]` Participant accounts in strict wallet order
     FinalizeWinners,
 
     /// Begin the reveal phase immediately (testing-only convenience)

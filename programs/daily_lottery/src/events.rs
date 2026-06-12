@@ -245,6 +245,24 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
+    /// Emitted after each chunk of scalable winner finalization.
+    FinalizationChunkProcessed {
+        lottery_id: u64,
+        lottery: String,
+        finalization_ledger: String,
+        phase: String,
+        batch_size: u64,
+        processed_count: u64,
+        required_count: u64,
+        eligible_count: u64,
+        total_eligible_tickets: u64,
+        current_round: u64,
+        target_winners: u64,
+        selected_winners_count: u64,
+        completed: bool,
+        timestamp: i64,
+    },
+
     /// Emitted when an individual winner is paid
     WinnerPaid {
         lottery_id: u64,
@@ -354,6 +372,7 @@ impl LotteryEvent {
             LotteryEvent::RefundsIssued { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RefundClaimed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnersFinalized { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::FinalizationChunkProcessed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnerPaid { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::PayoutsComplete { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::ServiceFeePaid { lottery_id, .. } => Some(*lottery_id),
@@ -388,6 +407,7 @@ impl LotteryEvent {
             LotteryEvent::RefundsIssued { timestamp, .. } => *timestamp,
             LotteryEvent::RefundClaimed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnersFinalized { timestamp, .. } => *timestamp,
+            LotteryEvent::FinalizationChunkProcessed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnerPaid { timestamp, .. } => *timestamp,
             LotteryEvent::PayoutsComplete { timestamp, .. } => *timestamp,
             LotteryEvent::ServiceFeePaid { timestamp, .. } => *timestamp,

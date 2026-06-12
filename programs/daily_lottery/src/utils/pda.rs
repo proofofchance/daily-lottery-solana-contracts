@@ -153,6 +153,18 @@ pub fn derive_winners_ledger_pda(program_id: &Pubkey, lottery_pubkey: &Pubkey) -
     Pubkey::find_program_address(&[b"winners_ledger", lottery_pubkey.as_ref()], program_id)
 }
 
+/// Derives a PDA for FinalizationLedger account
+/// Seeds: ["finalization_ledger", lottery_pubkey]
+pub fn derive_finalization_ledger_pda(
+    program_id: &Pubkey,
+    lottery_pubkey: &Pubkey,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"finalization_ledger", lottery_pubkey.as_ref()],
+        program_id,
+    )
+}
+
 /// Derives a PDA for VoteTally account
 /// Seeds: ["vote_tally", lottery_pubkey]
 pub fn derive_vote_tally_pda(program_id: &Pubkey, lottery_pubkey: &Pubkey) -> (Pubkey, u8) {
