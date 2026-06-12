@@ -10,6 +10,10 @@ Common local commands:
 - `npm test`
 - `npm run lint`
 
+Production release checklist:
+
+- [PRODUCTION_RELEASE_CHECKLIST.md](PRODUCTION_RELEASE_CHECKLIST.md)
+
 Notes:
 
 - Upload and attestation refer to the same participant phase.
