@@ -26,8 +26,12 @@ Notes:
   `service_charge_bps` at creation, so a later config change cannot alter
   already-created buy, refund, or payout math.
 - Winner finalization is chunked through a `FinalizationLedger` PDA. Ticket
-  purchases are not capped by participant count; sorted participant chunks are
-  submitted until aggregation and weighted winner selection complete.
+  purchases assign an immutable zero-based participant index and cap a round at
+  4,096 unique participants. Any caller may submit chunks, but every pass must
+  consume the exact next index.
+- Only verified reveal-included participants are eligible. The canonical pool
+  commitment binds index, wallet, ticket count, and reveal digest; draw indices
+  use rejection sampling.
 - Winner finalization rejects any selected winner set that would pay less than
   one lamport per winner.
 - Lottery accounts include an explicit layout version and reserved bytes so
@@ -42,4 +46,6 @@ Notes:
   participant claims with `ClaimRefund`.
 - Participants can bypass provider attestation receipts by submitting
   `AttestReveal`, which verifies their reveal against the original commitment and
-  includes it in settlement entropy on-chain.
+  includes it in settlement entropy and the ticket-weighted winner-count tally.
+- Each winner-page append emits `WinnerSelected`, so event replay can rebuild the
+  winner set after participant accounts are closed.

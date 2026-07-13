@@ -130,6 +130,10 @@ pub fn process(
 
         existing
     } else {
+        if lottery.participants_count >= crate::state::sizes::MAX_PARTICIPANTS {
+            return Err(Error::ParticipantLimitReached.into());
+        }
+
         // Create new participant account
         let rent = Rent::get()?;
         let participant_space = crate::state::sizes::PARTICIPANT_SIZE;
@@ -167,6 +171,7 @@ pub fn process(
             *buyer_ai.key,
             proof_hash,
             0, // Will be updated by add_tickets call below
+            lottery.participants_count,
         );
 
         // New participant, increment participants_count
@@ -201,6 +206,7 @@ pub fn process(
         total_tickets_for_lottery: lottery.total_tickets,
         amount_paid: total_cost,
         total_funds: lottery.total_funds,
+        participant_index: participant.participant_index,
         proof_of_chance_hash: provided_proof,
         timestamp: current_time,
     };

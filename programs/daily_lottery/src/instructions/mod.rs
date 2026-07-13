@@ -295,7 +295,9 @@ pub enum Instruction {
     /// 0. `[]` Config account
     /// 1. `[writable]` Lottery account
     /// 2. `[writable]` Participant account
-    /// 3. `[signer]` Participant wallet
+    /// 3. `[writable, signer]` Participant wallet
+    /// 4. `[writable]` VoteTally PDA (`["vote_tally", lottery]`)
+    /// 5. `[]` System program
     AttestReveal {
         voted_number_of_winners: u64,
         reveal_plaintext: Vec<u8>,

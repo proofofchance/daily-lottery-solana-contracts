@@ -108,6 +108,10 @@ fn create_and_buy_flow() {
     let part_account = ctx
         .get_account(participant_pda)
         .expect("participant account");
+    assert_eq!(
+        part_account.data.len(),
+        daily_lottery::state::sizes::PARTICIPANT_SIZE
+    );
     let part: Participant = read_after_disc(&part_account.data);
     assert_eq!(part.tickets_bought, 2);
     assert_eq!(part.proof_of_chance_hash, poc_hash);

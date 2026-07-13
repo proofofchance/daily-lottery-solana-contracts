@@ -83,6 +83,7 @@ pub enum LotteryEvent {
         total_tickets_for_lottery: u64,
         amount_paid: u64,
         total_funds: u64,
+        participant_index: u64,
         proof_of_chance_hash: Option<[u8; 32]>,
         timestamp: i64,
     },
@@ -268,6 +269,21 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
+    /// Emitted when a winner is appended to the canonical on-chain winner pages.
+    /// This keeps immutable event replay sufficient even when an external keeper
+    /// (rather than the Ark backend) advances finalization.
+    WinnerSelected {
+        lottery_id: u64,
+        lottery: String,
+        participant: String,
+        winner: String,
+        winner_index: u64,
+        tickets: u64,
+        page_index: u32,
+        page_offset: u32,
+        timestamp: i64,
+    },
+
     /// Emitted after each chunk of scalable winner finalization.
     FinalizationChunkProcessed {
         lottery_id: u64,
@@ -397,6 +413,7 @@ impl LotteryEvent {
             LotteryEvent::RefundVaultClosed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::ParticipantClosed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnersFinalized { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::WinnerSelected { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::FinalizationChunkProcessed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnerPaid { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::PayoutsComplete { lottery_id, .. } => Some(*lottery_id),
@@ -434,6 +451,7 @@ impl LotteryEvent {
             LotteryEvent::RefundVaultClosed { timestamp, .. } => *timestamp,
             LotteryEvent::ParticipantClosed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnersFinalized { timestamp, .. } => *timestamp,
+            LotteryEvent::WinnerSelected { timestamp, .. } => *timestamp,
             LotteryEvent::FinalizationChunkProcessed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnerPaid { timestamp, .. } => *timestamp,
             LotteryEvent::PayoutsComplete { timestamp, .. } => *timestamp,
@@ -516,6 +534,7 @@ mod tests {
             total_tickets_for_lottery: 100,
             amount_paid: 5000,
             total_funds: 50000,
+            participant_index: 0,
             proof_of_chance_hash: None,
             timestamp: 1640995200,
         };

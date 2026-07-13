@@ -364,16 +364,16 @@ fn load_finalization_ledger(
     Some(read_after_disc(&account.data))
 }
 
-fn sorted_participants_by_wallet(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
+fn sorted_participants_by_index(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
     let mut keyed = participants
         .iter()
         .map(|participant_pda| {
             let account = ctx.get_account(*participant_pda).unwrap();
             let participant: Participant = read_after_disc(&account.data);
-            (participant.wallet, *participant_pda)
+            (participant.participant_index, *participant_pda)
         })
         .collect::<Vec<_>>();
-    keyed.sort_by(|left, right| left.0.to_bytes().cmp(&right.0.to_bytes()));
+    keyed.sort_by_key(|entry| entry.0);
     keyed
         .into_iter()
         .map(|(_, participant)| participant)
@@ -432,7 +432,7 @@ fn finalize_winners_until_complete(
     participants: &[Pubkey],
     chunk_size: usize,
 ) {
-    let sorted_participants = sorted_participants_by_wallet(ctx, participants);
+    let sorted_participants = sorted_participants_by_index(ctx, participants);
     let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
     let mut iterations = 0usize;
     loop {
@@ -459,7 +459,7 @@ fn finalize_winners_until_complete(
                 let ledger = ledger.as_ref().unwrap();
                 (
                     ledger.round_processed_count as usize,
-                    ledger.eligible_count as usize,
+                    ledger.required_count as usize,
                 )
             }
             Some(FINALIZATION_PHASE_COMPLETED) => return,
@@ -568,6 +568,24 @@ fn finalize_winners_sets_fields() {
     );
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
+    // A permissionless caller cannot start at a later participant index and
+    // strand the canonical prefix. The failed transaction leaves no poisoned
+    // finalization root behind.
+    assert!(finalize_winners_chunk(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_b],
+    )
+    .is_err());
+    assert!(
+        load_finalization_ledger(&mut ctx, finalization_ledger_pda(&program_id, &lottery_pda),)
+            .is_none()
+    );
+
     finalize_winners_until_complete(
         &mut ctx,
         program_id,
@@ -587,7 +605,7 @@ fn finalize_winners_sets_fields() {
 }
 
 #[test]
-fn finalize_winners_keeps_non_revealing_buyers_eligible() {
+fn finalize_winners_excludes_non_revealing_buyers() {
     let program_id = Pubkey::new_unique();
     let authority = Keypair::new();
     let buyer_a = Keypair::new();
@@ -667,8 +685,8 @@ fn finalize_winners_keeps_non_revealing_buyers_eligible() {
     let ledger =
         load_finalization_ledger(&mut ctx, finalization_ledger_pda(&program_id, &lottery_pda))
             .unwrap();
-    assert_eq!(ledger.eligible_count, 2);
-    assert_eq!(ledger.total_eligible_tickets, 5);
+    assert_eq!(ledger.eligible_count, 1);
+    assert_eq!(ledger.total_eligible_tickets, 1);
 }
 
 #[test]
@@ -757,7 +775,7 @@ fn finalize_winners_selection_rejects_participant_missing_aggregation_inclusion(
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
     let sorted_participants =
-        sorted_participants_by_wallet(&mut ctx, &[participant_a, participant_b]);
+        sorted_participants_by_index(&mut ctx, &[participant_a, participant_b]);
     finalize_winners_chunk(
         &mut ctx,
         program_id,
@@ -1435,7 +1453,8 @@ fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
     let buyer_b = Keypair::new();
     let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
 
-    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+    let (config_pda, lottery_pda, vault_pda, vote_tally_pda) =
+        setup_lottery(&mut ctx, program_id, &authority);
 
     let secret_a = b"self-a\x1fsalt";
     let secret_b = b"self-b\x1fsalt";
@@ -1480,7 +1499,9 @@ fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
                 AccountMeta::new_readonly(config_pda, false),
                 AccountMeta::new(lottery_pda, false),
                 AccountMeta::new(participant, false),
-                AccountMeta::new_readonly(buyer.pubkey(), true),
+                AccountMeta::new(buyer.pubkey(), true),
+                AccountMeta::new(vote_tally_pda, false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&Instruction::AttestReveal {
                 voted_number_of_winners: 1,

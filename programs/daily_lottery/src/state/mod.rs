@@ -101,7 +101,11 @@ pub mod sizes {
     /// Size of Participant account in bytes (discriminator + data)
     /// lottery[32] + wallet[32] + reveal_hash[32] + tickets[8] + attested[1]
     /// + attested_at_unix[8] + voted_number_of_winners[8] + reveal_score[8]
-    pub const PARTICIPANT_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 8 + 8 + 4 + 4 + 4;
+    /// + participant_index[8] + reveal_digest[32] + finalization markers[12]
+    pub const PARTICIPANT_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 8 + 8 + 8 + 32 + 4 + 4 + 4;
+
+    /// Hard upper bound used to keep permissionless settlement work finite.
+    pub const MAX_PARTICIPANTS: u64 = 4_096;
 
     /// Size of Vault account in bytes (discriminator + data)
     /// lottery[32] + bump[1]

@@ -34,16 +34,16 @@ fn winner_page_pda(program_id: &Pubkey, lottery_pda: &Pubkey, page_index: u32) -
     .0
 }
 
-fn sorted_participants_by_wallet(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
+fn participants_by_index(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
     let mut keyed = participants
         .iter()
         .map(|participant_pda| {
             let account = ctx.get_account(*participant_pda).unwrap();
             let participant: Participant = read_after_disc(&account.data);
-            (participant.wallet, *participant_pda)
+            (participant.participant_index, *participant_pda)
         })
         .collect::<Vec<_>>();
-    keyed.sort_by(|left, right| left.0.to_bytes().cmp(&right.0.to_bytes()));
+    keyed.sort_by_key(|(participant_index, _)| *participant_index);
     keyed
         .into_iter()
         .map(|(_, participant)| participant)
@@ -285,7 +285,7 @@ fn full_flow_attest_upload_settle() {
 
     ctx.warp_to_slot(200_000);
 
-    let sorted_participants = sorted_participants_by_wallet(&mut ctx, &[part_a_pda, part_b_pda]);
+    let sorted_participants = participants_by_index(&mut ctx, &[part_a_pda, part_b_pda]);
     assert_eq!(sorted_participants.len(), 2);
     finalize_winners_once(
         &mut ctx,
