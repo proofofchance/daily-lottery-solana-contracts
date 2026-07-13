@@ -19,7 +19,7 @@
 //! - Lottery: `["lottery", config_pubkey, lottery_id_le_bytes]`
 //! - Participant: `["participant", lottery_pubkey, wallet_pubkey]`
 //! - Vault: `["vault", lottery_pubkey]`
-//! - FinalizationLedger: `["finalization_ledger", lottery_pubkey]`
+//! - FinalizationLedger: `["finalization_root_v2", lottery_pubkey]`
 
 pub mod config;
 pub mod finalization_ledger;
@@ -101,7 +101,7 @@ pub mod sizes {
     /// Size of Participant account in bytes (discriminator + data)
     /// lottery[32] + wallet[32] + reveal_hash[32] + tickets[8] + attested[1]
     /// + attested_at_unix[8] + voted_number_of_winners[8] + reveal_score[8]
-    pub const PARTICIPANT_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 8 + 8;
+    pub const PARTICIPANT_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 8 + 8 + 4 + 4 + 4;
 
     /// Size of Vault account in bytes (discriminator + data)
     /// lottery[32] + bump[1]

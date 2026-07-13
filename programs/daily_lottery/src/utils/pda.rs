@@ -154,13 +154,29 @@ pub fn derive_winners_ledger_pda(program_id: &Pubkey, lottery_pubkey: &Pubkey) -
 }
 
 /// Derives a PDA for FinalizationLedger account
-/// Seeds: ["finalization_ledger", lottery_pubkey]
+/// Seeds: ["finalization_root_v2", lottery_pubkey]
 pub fn derive_finalization_ledger_pda(
     program_id: &Pubkey,
     lottery_pubkey: &Pubkey,
 ) -> (Pubkey, u8) {
     Pubkey::find_program_address(
-        &[b"finalization_ledger", lottery_pubkey.as_ref()],
+        &[b"finalization_root_v2", lottery_pubkey.as_ref()],
+        program_id,
+    )
+}
+
+/// Derives a bounded protocol-v2 winner page PDA.
+pub fn derive_winner_page_pda(
+    program_id: &Pubkey,
+    lottery_pubkey: &Pubkey,
+    page_index: u32,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            b"winner_page",
+            lottery_pubkey.as_ref(),
+            &page_index.to_le_bytes(),
+        ],
         program_id,
     )
 }

@@ -8,8 +8,8 @@
 //! ### Proof-of-Chance Model
 //! - Participants provide a secret phrase that gets hashed on-chain
 //! - During reveal window, participants upload plaintext to service provider
-//! - Provider uploads all reveals on-chain for transparent entropy generation
-//! - Winner is selected deterministically using aggregated entropy
+//! - Included reveals provide transparent entropy generation
+//! - Winners are selected deterministically from all ticket buyers
 //!
 //! ### Anti-Censorship Design
 //! - Participants can attest on-chain that they've uploaded their reveal

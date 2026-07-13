@@ -13,7 +13,7 @@
 //!
 //! ### Lottery Lifecycle Instructions  
 //! - [`create_lottery`]: Create a new daily lottery instance
-//! - [`finalize_winners`]: Finalize winners and store merkle commitment
+//! - [`finalize_winners`]: Finalize winners into fixed winner-page PDAs
 //! - [`settle_payout_batch`]: Process batch of winner payouts
 //!
 //! ### Participant Instructions
@@ -21,6 +21,8 @@
 //! - [`attest_uploaded`]: Attest to off-chain reveal upload
 //! - [`attest_reveal`]: Attest and include a reveal on-chain
 //! - [`claim_refund`]: Claim a program-vault refund after cancellation
+//! - [`close_refund_vault`]: Reclaim refund-path vault rent after all claims
+//! - [`close_participant`]: Reclaim terminal participant account rent
 //!
 //! ### Provider Instructions
 //! - [`upload_reveals`]: Upload batch of participant reveals
@@ -32,6 +34,8 @@ pub mod attest_uploaded;
 pub mod begin_reveal_phase;
 pub mod buy_tickets;
 pub mod claim_refund;
+pub mod close_participant;
+pub mod close_refund_vault;
 pub mod create_lottery;
 pub mod finalize_no_attesters;
 pub mod finalize_winners;
@@ -46,6 +50,8 @@ pub use attest_uploaded::process as process_attest_uploaded;
 pub use begin_reveal_phase::process as process_begin_reveal_phase;
 pub use buy_tickets::process as process_buy_tickets;
 pub use claim_refund::process as process_claim_refund;
+pub use close_participant::process as process_close_participant;
+pub use close_refund_vault::process as process_close_refund_vault;
 pub use create_lottery::process as process_create_lottery;
 pub use finalize_no_attesters::process as process_finalize_no_attesters;
 pub use finalize_winners::process as process_finalize_winners;
@@ -69,6 +75,8 @@ pub const TAG_FINALIZE_NO_ATTESTERS: u8 = 9;
 pub const TAG_SETTLE_PAYOUT_BATCH: u8 = 10;
 pub const TAG_CLAIM_REFUND: u8 = 14;
 pub const TAG_ATTEST_REVEAL: u8 = 15;
+pub const TAG_CLOSE_REFUND_VAULT: u8 = 16;
+pub const TAG_CLOSE_PARTICIPANT: u8 = 17;
 
 /// All possible instructions for the daily lottery program
 ///
@@ -196,20 +204,21 @@ pub enum Instruction {
         upload_secs: u32,
     },
 
-    /// Finalize winners and store merkle commitment in chunks
+    /// Finalize winners into a fixed root and bounded winner pages in chunks
     ///
-    /// Aggregates reveal-included participants into a FinalizationLedger, then
-    /// scans sorted participant chunks once per weighted draw round. Stores the
-    /// final winners merkle root on-chain for batch settlement verification.
+    /// Aggregates every ticket buyer into a FinalizationLedger, then scans
+    /// sorted participant chunks once per weighted draw round. Included reveals
+    /// determine entropy and winner-count votes; every buyer remains eligible.
     ///
     /// Accounts expected:
     /// 0. `[]` Config account
     /// 1. `[writable]` Lottery account
     /// 2. `[writable]` Vault account
-    /// 3. `[writable, signer]` Authority
+    /// 3. `[writable, signer]` Permissionless transaction payer
     /// 4. `[]` System program
-    /// 5. `[writable]` FinalizationLedger PDA (`["finalization_ledger", lottery]`)
-    ///    6..N. `[writable]` Participant accounts in strict wallet order
+    /// 5. `[writable]` FinalizationLedger PDA (`["finalization_root_v2", lottery]`)
+    /// 6. `[writable]` WinnerPage PDA (`["winner_page", lottery, page_index]`)
+    ///    7..N. `[writable]` Participant accounts in strict wallet order
     FinalizeWinners,
 
     /// Begin the reveal phase immediately (testing-only convenience)
@@ -238,16 +247,17 @@ pub enum Instruction {
 
     /// Process a batch of winner payouts
     ///
-    /// Verifies merkle proofs and transfers funds directly to winners.
+    /// Verifies fixed winner-page entries and transfers funds directly to winners.
     /// Can be called multiple times to process all winners in batches.
     ///
     /// Accounts expected:
     /// 0. `[]` Config account
     /// 1. `[writable]` Lottery account
     /// 2. `[writable]` Vault account
-    /// 3. `[signer]` Authority
-    /// 4. `[writable]` WinnersLedger account (PDA: ["winners_ledger", lottery])
-    ///    5..N. `[writable]` Winner wallet accounts
+    /// 3. `[writable]` Authority fee/rent recipient
+    /// 4. `[]` System program
+    /// 5. `[writable]` WinnerPage PDA (`["winner_page", lottery, page_index]`)
+    ///    6..N. `[writable]` Winner wallet accounts
     SettlePayoutBatch {
         lottery_id: u64,
         batch_index: u32,
@@ -290,6 +300,24 @@ pub enum Instruction {
         voted_number_of_winners: u64,
         reveal_plaintext: Vec<u8>,
     },
+
+    /// Close a refund-path vault after all participant refunds are claimed.
+    ///
+    /// Accounts expected:
+    /// 0. `[]` Config account
+    /// 1. `[]` Lottery account
+    /// 2. `[writable]` Vault account
+    /// 3. `[writable]` Authority wallet
+    CloseRefundVault,
+
+    /// Close a terminal participant account and return its rent to the wallet.
+    ///
+    /// Accounts expected:
+    /// 0. `[]` Config account
+    /// 1. `[]` Lottery account
+    /// 2. `[writable]` Participant account
+    /// 3. `[writable, signer]` Participant wallet
+    CloseParticipant,
 }
 
 /// Instruction processing dispatcher
@@ -530,6 +558,16 @@ pub fn process_instruction(
                 voted_number_of_winners,
                 reveal_plaintext,
             )
+        }
+
+        TAG_CLOSE_REFUND_VAULT => {
+            // Layout: [tag u8]
+            process_close_refund_vault(program_id, accounts)
+        }
+
+        TAG_CLOSE_PARTICIPANT => {
+            // Layout: [tag u8]
+            process_close_participant(program_id, accounts)
         }
 
         _ => {

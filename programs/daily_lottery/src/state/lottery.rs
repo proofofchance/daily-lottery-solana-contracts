@@ -60,7 +60,7 @@ impl From<LotteryStatus> for u8 {
 /// 1. Participants buy tickets during buy window
 /// 2. Upload window opens; participants upload PoC to provider and vote-and-attest on-chain
 /// 3. Settlement begins after upload window (or when all have attested); provider uploads PoCs in batches
-/// 4. Lottery is settled using deterministic reveal-plaintext draw from reveal-included commitments
+/// 4. Lottery is settled using reveal-derived entropy over all ticket buyers
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct Lottery {
     /// Unique lottery ID (sequential, starting from 1)
@@ -136,7 +136,8 @@ pub struct Lottery {
     /// Packed bitmap tracking which winners have been paid (bit index = winner index)
     pub paid_winners_bitmap: Vec<u8>,
 
-    /// Number of settlement batches completed
+    /// Number of payout batches completed. On refund-only rounds, this counts
+    /// successful participant refund claims so the vault can close after all claims.
     pub settlement_batches_completed: u32,
 
     /// Whether all winners have been paid and settlement is complete
@@ -203,6 +204,7 @@ impl Default for Lottery {
 
 impl Lottery {
     /// Creates a new lottery with the given parameters
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: u64,
         config: Pubkey,

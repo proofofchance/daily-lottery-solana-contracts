@@ -57,6 +57,15 @@ pub struct Participant {
     /// Score derived from revealed lucky words (character count after lowercase+trim)
     /// Set during UploadReveals; informational only (not used for payout entropy)
     pub reveal_score: u64,
+
+    /// Protocol-v2 finalization pass that processed this participant.
+    pub finalization_generation: u32,
+
+    /// Protocol-v2 generation in which this wallet was selected.
+    pub selected_generation: u32,
+
+    /// Draw round in which this wallet was selected.
+    pub selected_round: u32,
 }
 
 impl Participant {
@@ -82,6 +91,9 @@ impl Participant {
             attested_at_unix: 0,
             voted_number_of_winners: 0,
             reveal_score: 0,
+            finalization_generation: 0,
+            selected_generation: 0,
+            selected_round: 0,
         }
     }
 
@@ -176,6 +188,19 @@ impl Participant {
     /// Checks if the participant has any tickets in this lottery
     pub fn has_tickets(&self) -> bool {
         self.tickets_bought > 0
+    }
+
+    pub fn mark_finalized_for_generation(&mut self, generation: u32) {
+        self.finalization_generation = generation;
+    }
+
+    pub fn selected_in_generation(&self, generation: u32) -> bool {
+        generation != 0 && self.selected_generation == generation
+    }
+
+    pub fn mark_selected(&mut self, generation: u32, round: u32) {
+        self.selected_generation = generation;
+        self.selected_round = round;
     }
 
     /// Gets the participant's ticket range for winner selection

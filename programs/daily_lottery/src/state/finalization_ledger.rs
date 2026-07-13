@@ -1,15 +1,16 @@
-//! Chunked winner finalization state for daily lottery rounds.
+//! Fixed-size protocol-v2 finalization state for daily lottery rounds.
 //!
-//! The ledger lets FinalizeWinners process participant accounts over many
-//! transactions while preserving deterministic weighted draws without
-//! replacement.
+//! Winner records live in bounded `WinnerPage` PDAs, so neither finalization nor
+//! payout requires an account whose size grows with the configured winner cap.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::pubkey::Pubkey;
 
+pub const FINALIZATION_PROTOCOL_VERSION: u16 = 2;
 pub const FINALIZATION_PHASE_AGGREGATING: u8 = 0;
 pub const FINALIZATION_PHASE_SELECTING: u8 = 1;
 pub const FINALIZATION_PHASE_COMPLETED: u8 = 2;
+pub const WINNERS_PER_PAGE: usize = 100;
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SelectedWinner {
@@ -17,111 +18,75 @@ pub struct SelectedWinner {
     pub tickets: u64,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Debug, Default, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct FinalizationLedger {
-    /// Lottery this ledger belongs to.
     pub lottery: Pubkey,
-    /// Maximum winner-count vote tracked by this ledger.
-    pub max_winners: u64,
-    /// Final number of winners selected after aggregation.
-    pub target_winners: u64,
-    /// Aggregation pass participant count.
-    pub processed_count: u64,
-    /// Reveal-included participants eligible for winner selection.
-    pub eligible_count: u64,
-    /// Sum of tickets held by eligible participants.
-    pub total_eligible_tickets: u64,
-    /// Chunkable commitment over eligible participants in wallet order.
-    pub participants_commitment: [u8; 32],
-    /// Final seed used for deterministic weighted draws.
-    pub seed: [u8; 32],
-    /// Current finalization phase.
+    pub protocol_version: u16,
     pub phase: u8,
-    /// Current draw round during winner selection.
-    pub current_round: u64,
-    /// Participants scanned in the current draw round.
+    pub generation: u32,
+    pub required_count: u64,
+    pub processed_count: u64,
+    pub eligible_count: u64,
+    pub total_eligible_tickets: u64,
+    pub seed: [u8; 32],
+    pub participants_commitment: [u8; 32],
+    pub target_winners: u32,
+    pub current_round: u32,
+    pub selected_count: u32,
+    pub selected_tickets_total: u64,
     pub round_processed_count: u64,
-    /// Remaining-ticket cumulative cursor for the current draw round.
     pub round_remaining_tickets_seen: u64,
-    /// Draw index for the current round.
     pub round_draw_index: u64,
-    /// Winner found during the current round.
-    pub round_winner_wallet: Pubkey,
-    /// Ticket weight of the winner found during the current round.
-    pub round_winner_tickets: u64,
-    /// Whether the current round has found its winner.
-    pub round_winner_found: bool,
-    /// Whether `last_processed_wallet` has been initialized for this pass.
+    pub pending_winner: Pubkey,
+    pub pending_winner_tickets: u64,
+    pub pending_winner_found: bool,
     pub has_last_wallet: bool,
-    /// Last wallet processed in the current sorted pass.
     pub last_processed_wallet: Pubkey,
-    /// Winners already selected, in draw order.
-    pub winners: Vec<SelectedWinner>,
-    /// Weighted vote totals by winner count, indexed 1..=max_winners.
-    pub vote_weights: Vec<u128>,
-    /// Earliest attestation timestamp by winner count, indexed 1..=max_winners.
-    pub vote_first_seen: Vec<i64>,
+    pub winners_commitment: [u8; 32],
+    pub completed: bool,
     pub started_at_unix: i64,
     pub completed_at_unix: i64,
+    pub reserved: [u8; 64],
 }
 
 impl FinalizationLedger {
-    pub const SELECTED_WINNER_SIZE: usize = 32 + 8;
+    pub const SIZE: usize = 8 + // discriminator
+        32 + 2 + 1 + 4 + 8 + 8 + 8 + 8 + 32 + 32 + 4 + 4 + 4 + 8 +
+        8 + 8 + 8 + 32 + 8 + 1 + 1 + 32 + 32 + 1 + 8 + 8 + 64;
 
-    pub fn size_for(max_winners: usize) -> usize {
-        let vote_len = max_winners.saturating_add(1);
-        8 + // discriminator
-            32 + // lottery
-            8 + // max_winners
-            8 + // target_winners
-            8 + // processed_count
-            8 + // eligible_count
-            8 + // total_eligible_tickets
-            32 + // participants_commitment
-            32 + // seed
-            1 + // phase
-            8 + // current_round
-            8 + // round_processed_count
-            8 + // round_remaining_tickets_seen
-            8 + // round_draw_index
-            32 + // round_winner_wallet
-            8 + // round_winner_tickets
-            1 + // round_winner_found
-            1 + // has_last_wallet
-            32 + // last_processed_wallet
-            4 + (max_winners * Self::SELECTED_WINNER_SIZE) + // winners vec
-            4 + (vote_len * 16) + // vote_weights
-            4 + (vote_len * 8) + // vote_first_seen
-            8 + // started_at_unix
-            8 // completed_at_unix
+    pub fn size_for(_max_winners: usize) -> usize {
+        Self::SIZE
     }
 
-    pub fn new(lottery: Pubkey, max_winners: u64, started_at_unix: i64) -> Self {
-        let vote_len = (max_winners as usize).saturating_add(1);
+    pub fn new(lottery: Pubkey, required_count: u64, started_at_unix: i64) -> Self {
         Self {
             lottery,
-            max_winners,
-            target_winners: 0,
+            protocol_version: FINALIZATION_PROTOCOL_VERSION,
+            phase: FINALIZATION_PHASE_AGGREGATING,
+            generation: 1,
+            required_count,
             processed_count: 0,
             eligible_count: 0,
             total_eligible_tickets: 0,
-            participants_commitment: [0; 32],
             seed: [0; 32],
-            phase: FINALIZATION_PHASE_AGGREGATING,
+            participants_commitment: [0; 32],
+            target_winners: 0,
             current_round: 0,
+            selected_count: 0,
+            selected_tickets_total: 0,
             round_processed_count: 0,
             round_remaining_tickets_seen: 0,
             round_draw_index: 0,
-            round_winner_wallet: Pubkey::default(),
-            round_winner_tickets: 0,
-            round_winner_found: false,
+            pending_winner: Pubkey::default(),
+            pending_winner_tickets: 0,
+            pending_winner_found: false,
             has_last_wallet: false,
             last_processed_wallet: Pubkey::default(),
-            winners: Vec::new(),
-            vote_weights: vec![0u128; vote_len],
-            vote_first_seen: vec![i64::MAX; vote_len],
+            winners_commitment: [0; 32],
+            completed: false,
             started_at_unix,
             completed_at_unix: 0,
+            reserved: [0; 64],
         }
     }
 
@@ -135,90 +100,189 @@ impl FinalizationLedger {
         self.round_processed_count = 0;
         self.round_remaining_tickets_seen = 0;
         self.round_draw_index = draw_index;
-        self.round_winner_wallet = Pubkey::default();
-        self.round_winner_tickets = 0;
-        self.round_winner_found = false;
+        self.pending_winner = Pubkey::default();
+        self.pending_winner_tickets = 0;
+        self.pending_winner_found = false;
         self.reset_pass_cursor();
-    }
-
-    pub fn add_vote(&mut self, count: u64, weight: u128, attested_at: i64) {
-        if count == 0 || count > self.max_winners {
-            return;
-        }
-        let idx = count as usize;
-        if idx >= self.vote_weights.len() {
-            return;
-        }
-        self.vote_weights[idx] = self.vote_weights[idx].saturating_add(weight);
-        if attested_at < self.vote_first_seen[idx] {
-            self.vote_first_seen[idx] = attested_at;
-        }
-    }
-
-    pub fn selected_winner_count(&self, participants_count: u64) -> u64 {
-        if participants_count <= 1 {
-            return 1;
-        }
-
-        let max_count = self.max_winners.min(participants_count.saturating_sub(1));
-        let mut best_count = 1u64;
-        let mut best_weight = 0u128;
-        let mut best_time = i64::MAX;
-
-        for count in 1..=max_count {
-            let idx = count as usize;
-            if idx >= self.vote_weights.len() {
-                break;
-            }
-            let weight = self.vote_weights[idx];
-            if weight == 0 {
-                continue;
-            }
-            let time = self.vote_first_seen.get(idx).copied().unwrap_or(i64::MAX);
-            if weight > best_weight
-                || (weight == best_weight && time < best_time)
-                || (weight == best_weight && time == best_time && count < best_count)
-            {
-                best_weight = weight;
-                best_time = time;
-                best_count = count;
-            }
-        }
-
-        if best_weight == 0 {
-            1
-        } else {
-            best_count
-        }
-    }
-
-    pub fn has_selected(&self, wallet: &Pubkey) -> bool {
-        self.winners.iter().any(|winner| &winner.wallet == wallet)
-    }
-
-    pub fn selected_tickets_total(&self) -> u64 {
-        self.winners
-            .iter()
-            .fold(0u64, |total, winner| total.saturating_add(winner.tickets))
     }
 
     pub fn remaining_tickets(&self) -> Result<u64, crate::error::Error> {
         self.total_eligible_tickets
-            .checked_sub(self.selected_tickets_total())
+            .checked_sub(self.selected_tickets_total)
             .ok_or(crate::error::Error::MathOverflow)
     }
 
-    pub fn push_winner(&mut self, wallet: Pubkey, tickets: u64) -> Result<(), crate::error::Error> {
-        if self.has_selected(&wallet) || self.winners.len() >= self.target_winners as usize {
+    pub fn record_winner(&mut self, winner: SelectedWinner) -> Result<(), crate::error::Error> {
+        if self.selected_count >= self.target_winners {
             return Err(crate::error::Error::InvalidInstruction);
         }
-        self.winners.push(SelectedWinner { wallet, tickets });
+        self.selected_count = self
+            .selected_count
+            .checked_add(1)
+            .ok_or(crate::error::Error::MathOverflow)?;
+        self.selected_tickets_total = self
+            .selected_tickets_total
+            .checked_add(winner.tickets)
+            .ok_or(crate::error::Error::MathOverflow)?;
+        self.winners_commitment =
+            extend_winners_commitment(self.winners_commitment, self.selected_count - 1, &winner);
         Ok(())
     }
 
     pub fn complete(&mut self, timestamp: i64) {
         self.phase = FINALIZATION_PHASE_COMPLETED;
+        self.completed = true;
         self.completed_at_unix = timestamp;
         self.reset_pass_cursor();
+    }
+}
+
+/// Small serialized header for a fixed-size winner-page account.
+///
+/// Winner entries and the paid bitmap are stored in the trailing account bytes
+/// and accessed by offset. Keeping the large fixed arrays out of this Rust value
+/// prevents BPF deserialization from placing a multi-kilobyte value on the stack.
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct WinnerPage {
+    pub lottery: Pubkey,
+    pub generation: u32,
+    pub page_index: u32,
+    pub count: u16,
+    pub reserved: [u8; 64],
+}
+
+impl Default for WinnerPage {
+    fn default() -> Self {
+        Self {
+            lottery: Pubkey::default(),
+            generation: 0,
+            page_index: 0,
+            count: 0,
+            reserved: [0; 64],
+        }
+    }
+}
+
+impl WinnerPage {
+    pub const SELECTED_WINNER_SIZE: usize = 32 + 8;
+    pub const HEADER_SIZE: usize = 8 + 32 + 4 + 4 + 2 + 64;
+    pub const ENTRIES_OFFSET: usize = Self::HEADER_SIZE;
+    pub const BITMAP_OFFSET: usize =
+        Self::ENTRIES_OFFSET + (WINNERS_PER_PAGE * Self::SELECTED_WINNER_SIZE);
+    pub const BITMAP_SIZE: usize = WINNERS_PER_PAGE.div_ceil(8);
+    pub const SIZE: usize = Self::BITMAP_OFFSET + Self::BITMAP_SIZE;
+
+    pub fn new(lottery: Pubkey, generation: u32, page_index: u32) -> Self {
+        Self {
+            lottery,
+            generation,
+            page_index,
+            ..Self::default()
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        account_data: &mut [u8],
+        winner: SelectedWinner,
+    ) -> Result<u16, crate::error::Error> {
+        let offset = self.count as usize;
+        if offset >= WINNERS_PER_PAGE || account_data.len() < Self::SIZE {
+            return Err(crate::error::Error::InvalidInstruction);
+        }
+        let start = Self::entry_offset(offset);
+        account_data[start..start + 32].copy_from_slice(winner.wallet.as_ref());
+        account_data[start + 32..start + 40].copy_from_slice(&winner.tickets.to_le_bytes());
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(crate::error::Error::MathOverflow)?;
+        Ok(offset as u16)
+    }
+
+    pub fn winner(&self, account_data: &[u8], offset: usize) -> Option<SelectedWinner> {
+        if offset >= self.count as usize || account_data.len() < Self::SIZE {
+            return None;
+        }
+        let start = Self::entry_offset(offset);
+        let mut wallet = [0u8; 32];
+        wallet.copy_from_slice(&account_data[start..start + 32]);
+        let mut tickets = [0u8; 8];
+        tickets.copy_from_slice(&account_data[start + 32..start + 40]);
+        Some(SelectedWinner {
+            wallet: Pubkey::new_from_array(wallet),
+            tickets: u64::from_le_bytes(tickets),
+        })
+    }
+
+    pub fn is_paid(&self, account_data: &[u8], offset: usize) -> bool {
+        offset < self.count as usize
+            && account_data.len() >= Self::SIZE
+            && (account_data[Self::BITMAP_OFFSET + offset / 8] & (1 << (offset % 8))) != 0
+    }
+
+    pub fn mark_paid(
+        &self,
+        account_data: &mut [u8],
+        offset: usize,
+    ) -> Result<(), crate::error::Error> {
+        if offset >= self.count as usize
+            || account_data.len() < Self::SIZE
+            || self.is_paid(account_data, offset)
+        {
+            return Err(crate::error::Error::WinnerAlreadyPaid);
+        }
+        account_data[Self::BITMAP_OFFSET + offset / 8] |= 1 << (offset % 8);
+        Ok(())
+    }
+
+    const fn entry_offset(offset: usize) -> usize {
+        Self::ENTRIES_OFFSET + (offset * Self::SELECTED_WINNER_SIZE)
+    }
+}
+
+fn extend_winners_commitment(current: [u8; 32], index: u32, winner: &SelectedWinner) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"IKIGAI_WINNERS_V2");
+    h.update(current);
+    h.update(index.to_le_bytes());
+    h.update(winner.wallet.to_bytes());
+    h.update(winner.tickets.to_le_bytes());
+    h.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn below_eight_kib(size: usize) -> bool {
+        size < 8 * 1024
+    }
+
+    #[test]
+    fn fixed_accounts_cover_one_thousand_winners_below_eight_kib() {
+        assert_eq!(
+            FinalizationLedger::size_for(1),
+            FinalizationLedger::size_for(1_000)
+        );
+        assert!(below_eight_kib(FinalizationLedger::SIZE));
+        assert!(below_eight_kib(WinnerPage::SIZE));
+        assert_eq!(1_000usize.div_ceil(WINNERS_PER_PAGE), 10);
+
+        let mut page = WinnerPage::new(Pubkey::new_unique(), 1, 0);
+        let mut data = vec![0u8; WinnerPage::SIZE];
+        for _ in 0..WINNERS_PER_PAGE {
+            page.append(
+                &mut data,
+                SelectedWinner {
+                    wallet: Pubkey::new_unique(),
+                    tickets: 1,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(page.count as usize, WINNERS_PER_PAGE);
+        assert!(page.append(&mut data, SelectedWinner::default()).is_err());
     }
 }

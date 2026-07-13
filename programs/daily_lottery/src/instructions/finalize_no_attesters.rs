@@ -11,7 +11,7 @@ use crate::{
     utils::{
         account::{read_account_data, write_account_data},
         pda::assert_pda_owned,
-        validation::{require_key_match, require_signer, require_writable},
+        validation::{require_key_match, require_writable},
     },
 };
 use solana_program::{
@@ -31,7 +31,7 @@ use solana_program::{
 /// 0. `[]` Config account
 /// 1. `[writable]` Lottery account
 /// 2. `[writable]` Vault account
-/// 3. `[writable, signer]` Authority wallet
+/// 3. `[writable]` Configured refund/rent recipient (does not need to sign)
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
 
@@ -46,7 +46,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     require_writable(lottery_ai)?;
     require_writable(vault_ai)?;
     require_writable(authority_ai)?;
-    require_signer(authority_ai)?;
 
     // Read account data
     let config: Config = read_account_data(config_ai)?;
@@ -75,7 +74,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
 
     // Check if lottery can be finalized
     if lottery.settled {
-        return Err(Error::LotteryAlreadySettled.into());
+        return Ok(());
     }
 
     // Check if upload (attestation) deadline has passed. Single-participant

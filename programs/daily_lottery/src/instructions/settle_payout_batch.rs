@@ -1,27 +1,26 @@
 //! # Settle Payout Batch Instruction
 //!
-//! This instruction processes a batch of winner payouts, verifying merkle proofs
-//! and transferring funds directly to winners.
+//! This instruction processes a batch of winner payouts, verifying each entry
+//! against its fixed winner-page PDA and transferring funds directly to winners.
 
 use crate::{
     error::Error,
     events::LotteryEvent,
-    state::{Config, Lottery, Vault, WinnersLedger},
+    state::{Config, Lottery, Vault, WinnerPage, WINNERS_PER_PAGE},
     utils::{
         account::{read_account_data, write_account_data},
-        pda::{assert_pda_owned, derive_winners_ledger_pda},
-        validation::{compute_service_fee, require_key_match, require_signer, require_writable},
+        pda::{assert_pda_owned, derive_winner_page_pda},
+        validation::{compute_service_fee, require_key_match, require_writable},
     },
 };
 use borsh::{BorshDeserialize, BorshSerialize};
-use sha2::{Digest, Sha256};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
     pubkey::Pubkey,
     sysvar::Sysvar,
 };
-use solana_system_interface::{instruction as system_instruction, program as system_program};
+use solana_system_interface::program as system_program;
 
 /// Winner proof for batch settlement
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
@@ -32,7 +31,7 @@ pub struct WinnerProof {
     pub recipient: Pubkey,
     /// Payout amount in lamports
     pub amount: u64,
-    /// Merkle proof path (array of sibling hashes)
+    /// Legacy ABI field. Protocol v2 verifies the fixed winner page directly.
     pub merkle_proof: Vec<[u8; 32]>,
 }
 
@@ -52,7 +51,7 @@ pub fn process(
     let vault_ai = next_account_info(account_info_iter)?;
     let authority_ai = next_account_info(account_info_iter)?;
     let system_program_ai = next_account_info(account_info_iter)?;
-    let winners_ledger_ai = next_account_info(account_info_iter)?;
+    let winner_page_ai = next_account_info(account_info_iter)?;
 
     // Remaining accounts are winner recipient wallets
     let recipient_accounts: Vec<&AccountInfo> = account_info_iter.collect();
@@ -61,7 +60,6 @@ pub fn process(
     assert_pda_owned(program_id, config_ai, &[b"config"])?;
     require_writable(lottery_ai)?;
     require_writable(vault_ai)?;
-    require_signer(authority_ai)?;
     require_writable(authority_ai)?;
     require_key_match(system_program_ai, &system_program::id())?;
 
@@ -69,48 +67,6 @@ pub fn process(
     let config: Config = read_account_data(config_ai)?;
     let mut lottery: Lottery = read_account_data(lottery_ai)?;
     let _vault: Vault = read_account_data(vault_ai)?;
-
-    // Ensure WinnersLedger exists and matches PDA; create if missing
-    let (expected_ledger_pda, ledger_bump) = derive_winners_ledger_pda(program_id, lottery_ai.key);
-    if &expected_ledger_pda != winners_ledger_ai.key {
-        return Err(Error::InvalidSeeds.into());
-    }
-    // If uninitialized, allocate (owner may be SystemProgram here)
-    if winners_ledger_ai.data_is_empty() {
-        let ledger_space = WinnersLedger::size_for(lottery.winners_count);
-        let lamports = solana_program::rent::Rent::get()?.minimum_balance(ledger_space);
-        let create_ix = system_instruction::create_account(
-            authority_ai.key,
-            &expected_ledger_pda,
-            lamports,
-            ledger_space as u64,
-            program_id,
-        );
-        solana_program::program::invoke_signed(
-            &create_ix,
-            &[
-                authority_ai.clone(),
-                winners_ledger_ai.clone(),
-                system_program_ai.clone(),
-            ],
-            &[&[b"winners_ledger", lottery_ai.key.as_ref(), &[ledger_bump]]],
-        )
-        .map_err(|_| Error::InvalidInstruction)?;
-        // Initialize content
-        let ledger = WinnersLedger {
-            lottery: *lottery_ai.key,
-            winners_count: lottery.winners_count,
-            paid_bitmap: vec![0u8; (lottery.winners_count as usize).div_ceil(8).max(1)],
-            settlement_batches_completed: 0,
-        };
-        write_account_data(winners_ledger_ai, "WinnersLedger", &ledger)?;
-    } else {
-        // Existing ledger must be owned by this program
-        if winners_ledger_ai.owner != program_id {
-            return Err(Error::IncorrectOwner.into());
-        }
-    }
-    let mut ledger: WinnersLedger = read_account_data(winners_ledger_ai)?;
 
     // Re-assert PDAs using loaded data to catch ordering or program-id mismatches
     assert_pda_owned(
@@ -124,7 +80,8 @@ pub fn process(
     )?;
     assert_pda_owned(program_id, vault_ai, &[b"vault", lottery_ai.key.as_ref()])?;
 
-    // Validate authority
+    // Validate authority fee/rent recipient. The authority does not need to sign:
+    // once the winners root is fixed, any caller may execute merkle-verified payouts.
     if authority_ai.key != &config.authority {
         return Err(Error::Unauthorized.into());
     }
@@ -135,12 +92,37 @@ pub fn process(
     }
 
     if lottery.settlement_complete {
-        return Err(Error::LotteryAlreadySettled.into());
+        return Ok(());
     }
 
     if lottery.winners_count == 0 {
         return Err(Error::InvalidInstruction.into());
     }
+
+    if winners.is_empty() {
+        return Err(Error::InvalidInstruction.into());
+    }
+    let page_index = u32::try_from(winners[0].index / WINNERS_PER_PAGE as u64)
+        .map_err(|_| Error::MathOverflow)?;
+    let (expected_page, _) = derive_winner_page_pda(program_id, lottery_ai.key, page_index);
+    if expected_page != *winner_page_ai.key {
+        return Err(Error::InvalidSeeds.into());
+    }
+    assert_pda_owned(
+        program_id,
+        winner_page_ai,
+        &[
+            b"winner_page",
+            lottery_ai.key.as_ref(),
+            &page_index.to_le_bytes(),
+        ],
+    )?;
+    require_writable(winner_page_ai)?;
+    let winner_page: WinnerPage = read_account_data(winner_page_ai)?;
+    if winner_page.lottery != *lottery_ai.key || winner_page.page_index != page_index {
+        return Err(Error::InvalidAccountData.into());
+    }
+    let expected_amount = lottery.total_payout / lottery.winners_count;
 
     // Validate we have enough recipient accounts
     if recipient_accounts.len() < winners.len() {
@@ -162,20 +144,33 @@ pub fn process(
             return Err(Error::InvalidInstruction.into());
         }
 
-        // 1. Verify merkle proof
-        verify_winner_merkle_proof(
-            &lottery.winners_merkle_root,
-            winner.index,
-            &winner.recipient,
-            winner.amount,
-            &winner.merkle_proof,
-        )?;
-
-        // 2. Check idempotency - ensure winner hasn't been paid already
-        if ledger.is_winner_paid(winner.index) {
-            return Err(Error::WinnerAlreadyPaid.into());
+        let winner_page_index = winner.index / WINNERS_PER_PAGE as u64;
+        if winner_page_index != page_index as u64 || winner.amount != expected_amount {
+            return Err(Error::InvalidInstruction.into());
+        }
+        let page_offset = (winner.index % WINNERS_PER_PAGE as u64) as usize;
+        let (stored, page_paid) = {
+            let page_data = winner_page_ai.try_borrow_data()?;
+            (
+                winner_page
+                    .winner(&page_data, page_offset)
+                    .ok_or(Error::InvalidInstruction)?,
+                winner_page.is_paid(&page_data, page_offset),
+            )
+        };
+        if stored.wallet != winner.recipient {
+            return Err(Error::InvalidInstruction.into());
         }
 
+        let lottery_paid = lottery.is_winner_paid(winner.index);
+        if page_paid || lottery_paid {
+            if page_paid && lottery_paid {
+                continue;
+            }
+            return Err(Error::InvalidAccountData.into());
+        }
+
+        // 2. Check idempotency - ensure winner hasn't been paid already
         // 3. Find recipient account
         let recipient_ai = recipient_accounts.get(i).ok_or(Error::MissingAccount)?;
 
@@ -197,7 +192,10 @@ pub fn process(
         }
 
         // 5. Mark winner as paid
-        ledger.mark_winner_paid(winner.index)?;
+        {
+            let mut page_data = winner_page_ai.try_borrow_mut_data()?;
+            winner_page.mark_paid(&mut page_data, page_offset)?;
+        }
         lottery.mark_winner_paid(winner.index)?;
 
         // 6. Emit winner paid event
@@ -215,10 +213,9 @@ pub fn process(
 
     // Update batch counter
     lottery.increment_settlement_batch();
-    ledger.settlement_batches_completed = ledger.settlement_batches_completed.saturating_add(1);
 
     // Check if all winners have been paid
-    if ledger.all_winners_paid() {
+    if lottery.all_winners_paid() {
         // Calculate and transfer service fee to authority
         let service_fee = compute_service_fee(lottery.total_funds, lottery.service_charge_bps)?;
         let payout_remainder = lottery
@@ -292,53 +289,6 @@ pub fn process(
 
     // Write updated lottery data
     write_account_data(lottery_ai, "Lottery", &lottery)?;
-    write_account_data(winners_ledger_ai, "WinnersLedger", &ledger)?;
 
     Ok(())
-}
-
-/// Verify a winner's merkle proof against the stored root
-fn verify_winner_merkle_proof(
-    merkle_root: &[u8; 32],
-    index: u64,
-    recipient: &Pubkey,
-    amount: u64,
-    proof: &[[u8; 32]],
-) -> Result<(), Error> {
-    // Compute leaf hash: hash(index || recipient || amount)
-    let mut leaf_data = Vec::new();
-    leaf_data.extend_from_slice(&index.to_le_bytes());
-    leaf_data.extend_from_slice(&recipient.to_bytes());
-    leaf_data.extend_from_slice(&amount.to_le_bytes());
-
-    let mut current_hash = Sha256::digest(&leaf_data);
-    let mut current_hash_array = [0u8; 32];
-    current_hash_array.copy_from_slice(&current_hash);
-
-    // Traverse up the merkle tree using the proof
-    let mut path_index = index;
-    for sibling in proof {
-        let mut combined = Vec::new();
-
-        if path_index % 2 == 0 {
-            // Current hash is left child
-            combined.extend_from_slice(&current_hash_array);
-            combined.extend_from_slice(sibling);
-        } else {
-            // Current hash is right child
-            combined.extend_from_slice(sibling);
-            combined.extend_from_slice(&current_hash_array);
-        }
-
-        current_hash = Sha256::digest(&combined);
-        current_hash_array.copy_from_slice(&current_hash);
-        path_index /= 2;
-    }
-
-    // Verify the computed root matches the stored root
-    if current_hash_array == *merkle_root {
-        Ok(())
-    } else {
-        Err(Error::InvalidMerkleProof)
-    }
 }

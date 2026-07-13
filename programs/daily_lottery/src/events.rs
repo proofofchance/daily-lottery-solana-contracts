@@ -234,6 +234,27 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
+    /// Emitted when a refund-path vault is closed after all refunds are claimed
+    RefundVaultClosed {
+        lottery_id: u64,
+        lottery: String,
+        vault: String,
+        authority: String,
+        refunds_claimed_count: u32,
+        vault_rent_reclaimed: u64,
+        timestamp: i64,
+    },
+
+    /// Emitted when a participant account is closed after terminal settlement
+    ParticipantClosed {
+        lottery_id: u64,
+        lottery: String,
+        participant: String,
+        wallet: String,
+        rent_reclaimed: u64,
+        timestamp: i64,
+    },
+
     /// Emitted when winners are finalized and merkle root is stored
     WinnersFinalized {
         lottery_id: u64,
@@ -373,6 +394,8 @@ impl LotteryEvent {
             LotteryEvent::NoBuyersConcluded { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RefundsIssued { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RefundClaimed { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::RefundVaultClosed { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::ParticipantClosed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnersFinalized { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::FinalizationChunkProcessed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnerPaid { lottery_id, .. } => Some(*lottery_id),
@@ -408,6 +431,8 @@ impl LotteryEvent {
             LotteryEvent::NoBuyersConcluded { timestamp, .. } => *timestamp,
             LotteryEvent::RefundsIssued { timestamp, .. } => *timestamp,
             LotteryEvent::RefundClaimed { timestamp, .. } => *timestamp,
+            LotteryEvent::RefundVaultClosed { timestamp, .. } => *timestamp,
+            LotteryEvent::ParticipantClosed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnersFinalized { timestamp, .. } => *timestamp,
             LotteryEvent::FinalizationChunkProcessed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnerPaid { timestamp, .. } => *timestamp,
