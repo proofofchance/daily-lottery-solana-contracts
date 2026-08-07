@@ -275,7 +275,7 @@ pub fn process(
         let reveal_digest = compute_reveal_digest(&participant.wallet, plaintext);
         reveal_digests.push(reveal_digest);
 
-        // Compute reveal_score from lucky words component for transparency analytics.
+        // Compute reveal_score from the lucky phrase component for transparency analytics.
         // This is informational only and never used for winner settlement entropy.
         let sep = 0x1f;
         let lw_bytes = if let Some(pos) = plaintext.iter().position(|&b| b == sep) {

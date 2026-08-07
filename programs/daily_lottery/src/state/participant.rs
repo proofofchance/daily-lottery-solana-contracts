@@ -22,7 +22,7 @@ use solana_program::pubkey::Pubkey;
 /// `["participant", lottery_pubkey, wallet_pubkey]`
 ///
 /// ## Proof-of-Chance Model
-/// - Participant provides SHA256 hash of their secret phrase on first purchase
+/// - Participant provides SHA256 hash of their lucky phrase on first purchase
 /// - Hash is immutable once set (ensures consistency across purchases)
 /// - Plaintext is revealed off-chain during reveal window
 /// - On-chain attestation proves off-chain upload to prevent censorship
@@ -34,7 +34,7 @@ pub struct Participant {
     /// The participant's wallet address
     pub wallet: Pubkey,
 
-    /// SHA256 hash of the participant's proof-of-chance secret phrase
+    /// SHA256 hash of the participant's proof-of-chance lucky phrase
     /// Set on first ticket purchase and cannot be changed
     pub proof_of_chance_hash: [u8; 32],
 
@@ -54,7 +54,7 @@ pub struct Participant {
     /// 0 means not yet voted; otherwise 1..=participants_count-1 at time of attestation
     pub voted_number_of_winners: u64,
 
-    /// Score derived from revealed lucky words (character count after lowercase+trim)
+    /// Score derived from the revealed lucky phrase (character count after lowercase+trim)
     /// Set during UploadReveals; informational only (not used for payout entropy)
     pub reveal_score: u64,
 }

@@ -15,7 +15,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use solana_program::msg;
 
-/// Winner's lucky word entry for WinnersLuckyWords event
+/// Winner's lucky phrase entry for the legacy WinnersLuckyWords event
 #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct WinnerLuckyWord {
     pub wallet: String,
@@ -198,7 +198,7 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
-    /// Emitted when winners' lucky words are revealed
+    /// Emitted when winners' lucky phrases are revealed
     WinnersLuckyWords {
         lottery_id: u64,
         lottery: String,
