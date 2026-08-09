@@ -69,8 +69,8 @@ must verify the upgrade authority immediately after deployment.
 1. Refresh The Ark program deployment metadata and runtime snapshot:
 
    ```bash
-   ./scripts/poc-env.sh production ark -- make -e -C the-ark-pg deployment-manifest-refresh
-   ./scripts/poc-env.sh production ark -- make -e -C the-ark-pg deployment-runtime-env-refresh
+   ./scripts/poc-env.sh production ark -- make -e -C the-ark deployment-manifest-refresh
+   ./scripts/poc-env.sh production ark -- make -e -C the-ark deployment-runtime-env-refresh
    ./scripts/poc-verify-enabled-deployment-manifest.sh production
    ```
 
