@@ -208,6 +208,7 @@ pub fn process(
         }
         tally
     };
+    vote_tally.total_attested = lottery.attested_count;
 
     // Build a map from participant -> plaintext, enforce no duplicates and length limits
     use std::collections::{BTreeMap, HashSet};
@@ -315,7 +316,7 @@ pub fn process(
         }
 
         participant.reveal_score = score;
-        participant.mark_reveal_included();
+        participant.include_verified_reveal(reveal_digest);
         write_account_data(participant_ai, "Participant", &participant)?;
 
         new_uploads = new_uploads.saturating_add(1);

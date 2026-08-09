@@ -83,6 +83,7 @@ pub enum LotteryEvent {
         total_tickets_for_lottery: u64,
         amount_paid: u64,
         total_funds: u64,
+        participant_index: u64,
         proof_of_chance_hash: Option<[u8; 32]>,
         timestamp: i64,
     },
@@ -234,6 +235,27 @@ pub enum LotteryEvent {
         timestamp: i64,
     },
 
+    /// Emitted when a refund-path vault is closed after all refunds are claimed
+    RefundVaultClosed {
+        lottery_id: u64,
+        lottery: String,
+        vault: String,
+        authority: String,
+        refunds_claimed_count: u32,
+        vault_rent_reclaimed: u64,
+        timestamp: i64,
+    },
+
+    /// Emitted when a participant account is closed after terminal settlement
+    ParticipantClosed {
+        lottery_id: u64,
+        lottery: String,
+        participant: String,
+        wallet: String,
+        rent_reclaimed: u64,
+        timestamp: i64,
+    },
+
     /// Emitted when winners are finalized and merkle root is stored
     WinnersFinalized {
         lottery_id: u64,
@@ -244,6 +266,21 @@ pub enum LotteryEvent {
         winners_merkle_root: [u8; 32],
         /// List of winner recipients for merkle proof generation
         winners: Vec<String>,
+        timestamp: i64,
+    },
+
+    /// Emitted when a winner is appended to the canonical on-chain winner pages.
+    /// This keeps immutable event replay sufficient even when an external keeper
+    /// (rather than the Ark backend) advances finalization.
+    WinnerSelected {
+        lottery_id: u64,
+        lottery: String,
+        participant: String,
+        winner: String,
+        winner_index: u64,
+        tickets: u64,
+        page_index: u32,
+        page_offset: u32,
         timestamp: i64,
     },
 
@@ -373,7 +410,10 @@ impl LotteryEvent {
             LotteryEvent::NoBuyersConcluded { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RefundsIssued { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::RefundClaimed { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::RefundVaultClosed { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::ParticipantClosed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnersFinalized { lottery_id, .. } => Some(*lottery_id),
+            LotteryEvent::WinnerSelected { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::FinalizationChunkProcessed { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::WinnerPaid { lottery_id, .. } => Some(*lottery_id),
             LotteryEvent::PayoutsComplete { lottery_id, .. } => Some(*lottery_id),
@@ -408,7 +448,10 @@ impl LotteryEvent {
             LotteryEvent::NoBuyersConcluded { timestamp, .. } => *timestamp,
             LotteryEvent::RefundsIssued { timestamp, .. } => *timestamp,
             LotteryEvent::RefundClaimed { timestamp, .. } => *timestamp,
+            LotteryEvent::RefundVaultClosed { timestamp, .. } => *timestamp,
+            LotteryEvent::ParticipantClosed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnersFinalized { timestamp, .. } => *timestamp,
+            LotteryEvent::WinnerSelected { timestamp, .. } => *timestamp,
             LotteryEvent::FinalizationChunkProcessed { timestamp, .. } => *timestamp,
             LotteryEvent::WinnerPaid { timestamp, .. } => *timestamp,
             LotteryEvent::PayoutsComplete { timestamp, .. } => *timestamp,
@@ -491,6 +534,7 @@ mod tests {
             total_tickets_for_lottery: 100,
             amount_paid: 5000,
             total_funds: 50000,
+            participant_index: 0,
             proof_of_chance_hash: None,
             timestamp: 1640995200,
         };

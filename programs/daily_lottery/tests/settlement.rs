@@ -8,8 +8,8 @@ use daily_lottery::{
     error::Error,
     instructions::settle_payout_batch::WinnerProof,
     state::{
-        FinalizationLedger, FINALIZATION_PHASE_AGGREGATING, FINALIZATION_PHASE_COMPLETED,
-        FINALIZATION_PHASE_SELECTING,
+        FinalizationLedger, WinnerPage, FINALIZATION_PHASE_AGGREGATING,
+        FINALIZATION_PHASE_COMPLETED, FINALIZATION_PHASE_SELECTING, WINNERS_PER_PAGE,
     },
     *,
 };
@@ -274,6 +274,37 @@ fn claim_refund(
     send_tx(ctx, vec![ix], &[wallet])
 }
 
+fn close_participant(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    participant_pda: Pubkey,
+    wallet: &Keypair,
+) -> litesvm::types::TransactionResult {
+    let ix = close_participant_ix(program_id, config_pda, lottery_pda, participant_pda, wallet);
+    send_tx(ctx, vec![ix], &[wallet])
+}
+
+fn close_participant_ix(
+    program_id: Pubkey,
+    config_pda: Pubkey,
+    lottery_pda: Pubkey,
+    participant_pda: Pubkey,
+    wallet: &Keypair,
+) -> SdkIx {
+    SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new_readonly(lottery_pda, false),
+            AccountMeta::new(participant_pda, false),
+            AccountMeta::new(wallet.pubkey(), true),
+        ],
+        data: borsh::to_vec(&Instruction::CloseParticipant).unwrap(),
+    }
+}
+
 fn load_lottery(ctx: &mut TestContext, lottery_pda: Pubkey) -> Lottery {
     let lot_acc = ctx.get_account(lottery_pda).unwrap();
     read_after_disc(&lot_acc.data)
@@ -299,7 +330,27 @@ fn force_clock_after_upload_deadline(ctx: &mut TestContext, lottery_pda: Pubkey)
 }
 
 fn finalization_ledger_pda(program_id: &Pubkey, lottery_pda: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"finalization_ledger", lottery_pda.as_ref()], program_id).0
+    Pubkey::find_program_address(&[b"finalization_root_v2", lottery_pda.as_ref()], program_id).0
+}
+
+fn winner_page_pda(program_id: &Pubkey, lottery_pda: &Pubkey, page_index: u32) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            b"winner_page",
+            lottery_pda.as_ref(),
+            &page_index.to_le_bytes(),
+        ],
+        program_id,
+    )
+    .0
+}
+
+fn load_winner(ctx: &mut TestContext, page_pda: Pubkey, offset: usize) -> Pubkey {
+    let account = ctx.get_account(page_pda).expect("winner page account");
+    let page: WinnerPage = read_after_disc(&account.data);
+    page.winner(&account.data, offset)
+        .expect("winner page entry")
+        .wallet
 }
 
 fn load_finalization_ledger(
@@ -313,16 +364,16 @@ fn load_finalization_ledger(
     Some(read_after_disc(&account.data))
 }
 
-fn sorted_participants_by_wallet(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
+fn sorted_participants_by_index(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
     let mut keyed = participants
         .iter()
         .map(|participant_pda| {
             let account = ctx.get_account(*participant_pda).unwrap();
             let participant: Participant = read_after_disc(&account.data);
-            (participant.wallet, *participant_pda)
+            (participant.participant_index, *participant_pda)
         })
         .collect::<Vec<_>>();
-    keyed.sort_by(|left, right| left.0.to_bytes().cmp(&right.0.to_bytes()));
+    keyed.sort_by_key(|entry| entry.0);
     keyed
         .into_iter()
         .map(|(_, participant)| participant)
@@ -339,6 +390,10 @@ fn finalize_winners_chunk(
     participant_accounts: &[Pubkey],
 ) -> litesvm::types::TransactionResult {
     let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
+    let page_index = load_finalization_ledger(ctx, finalization_ledger)
+        .map(|root| root.selected_count / WINNERS_PER_PAGE as u32)
+        .unwrap_or(0);
+    let winner_page = winner_page_pda(&program_id, &lottery_pda, page_index);
     let mut accounts = vec![
         AccountMeta::new(config_pda, false),
         AccountMeta::new(lottery_pda, false),
@@ -346,6 +401,7 @@ fn finalize_winners_chunk(
         AccountMeta::new(authority.pubkey(), true),
         AccountMeta::new_readonly(system_program::id(), false),
         AccountMeta::new(finalization_ledger, false),
+        AccountMeta::new(winner_page, false),
     ];
     for participant in participant_accounts {
         accounts.push(AccountMeta::new(*participant, false));
@@ -376,7 +432,7 @@ fn finalize_winners_until_complete(
     participants: &[Pubkey],
     chunk_size: usize,
 ) {
-    let sorted_participants = sorted_participants_by_wallet(ctx, participants);
+    let sorted_participants = sorted_participants_by_index(ctx, participants);
     let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
     let mut iterations = 0usize;
     loop {
@@ -403,7 +459,7 @@ fn finalize_winners_until_complete(
                 let ledger = ledger.as_ref().unwrap();
                 (
                     ledger.round_processed_count as usize,
-                    ledger.eligible_count as usize,
+                    ledger.required_count as usize,
                 )
             }
             Some(FINALIZATION_PHASE_COMPLETED) => return,
@@ -512,6 +568,24 @@ fn finalize_winners_sets_fields() {
     );
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
+    // A permissionless caller cannot start at a later participant index and
+    // strand the canonical prefix. The failed transaction leaves no poisoned
+    // finalization root behind.
+    assert!(finalize_winners_chunk(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_b],
+    )
+    .is_err());
+    assert!(
+        load_finalization_ledger(&mut ctx, finalization_ledger_pda(&program_id, &lottery_pda),)
+            .is_none()
+    );
+
     finalize_winners_until_complete(
         &mut ctx,
         program_id,
@@ -528,6 +602,91 @@ fn finalize_winners_sets_fields() {
     assert!(lot.winners_merkle_root.iter().any(|&b| b != 0));
     assert!(lot.total_payout > 0);
     assert!(lot.settlement_start_unix > 0);
+}
+
+#[test]
+fn finalize_winners_excludes_non_revealing_buyers() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer_a = Keypair::new();
+    let buyer_b = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
+
+    let (config_pda, lottery_pda, vault_pda, vote_tally_pda) =
+        setup_lottery(&mut ctx, program_id, &authority);
+
+    let secret_a = b"only-revealer";
+    let participant_a = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_a,
+        secret_a,
+        1,
+    );
+    let participant_b = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_b,
+        b"non-revealer",
+        4,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+    attest_uploaded(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_a,
+        &buyer_a,
+        &authority,
+        hash(secret_a).to_bytes(),
+        1,
+    );
+    force_clock_after_upload_deadline(&mut ctx, lottery_pda);
+    upload_reveals(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        vote_tally_pda,
+        vec![(participant_a, secret_a.to_vec())],
+        vec![participant_a],
+    );
+
+    finalize_winners_until_complete(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_a, participant_b],
+        1,
+    );
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert_eq!(lot.winners_count, 1);
+    let ledger =
+        load_finalization_ledger(&mut ctx, finalization_ledger_pda(&program_id, &lottery_pda))
+            .unwrap();
+    assert_eq!(ledger.eligible_count, 1);
+    assert_eq!(ledger.total_eligible_tickets, 1);
 }
 
 #[test]
@@ -616,7 +775,7 @@ fn finalize_winners_selection_rejects_participant_missing_aggregation_inclusion(
     force_clock_after_upload_deadline(&mut ctx, lottery_pda);
 
     let sorted_participants =
-        sorted_participants_by_wallet(&mut ctx, &[participant_a, participant_b]);
+        sorted_participants_by_index(&mut ctx, &[participant_a, participant_b]);
     finalize_winners_chunk(
         &mut ctx,
         program_id,
@@ -636,10 +795,8 @@ fn finalize_winners_selection_rejects_participant_missing_aggregation_inclusion(
     let participant_account = ctx.get_account(corrupted_participant_pda).unwrap();
     let mut participant: Participant = read_after_disc(&participant_account.data);
     assert!(participant.reveal_included());
-    assert!(participant.settlement_included());
-    participant.voted_number_of_winners = participant.voted_winners();
-    participant.mark_reveal_included();
-    assert!(!participant.settlement_included());
+    assert_eq!(participant.finalization_generation, ledger.generation);
+    participant.finalization_generation = 0;
     store_participant(&mut ctx, corrupted_participant_pda, &participant);
 
     let err = finalize_winners_chunk(
@@ -998,6 +1155,192 @@ fn finalize_no_attesters_refund_path_still_works() {
 }
 
 #[test]
+fn participant_can_close_after_refund_claim() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer]);
+
+    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+    let participant_pda = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer,
+        b"close-participant-refund",
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        1,
+        1,
+    );
+    force_clock_after_upload_deadline(&mut ctx, lottery_pda);
+
+    let finalize_no_attesters_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(authority.pubkey(), true),
+        ],
+        data: borsh::to_vec(&Instruction::FinalizeNoAttesters).unwrap(),
+    };
+    send_tx(&mut ctx, vec![finalize_no_attesters_ix], &[&authority]).unwrap();
+
+    let early_close = close_participant(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_pda,
+        &buyer,
+    )
+    .expect_err("participant rent should stay locked until refund claim");
+    assert_custom_error(early_close, Error::InvalidLotteryState as u32);
+
+    claim_refund(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        participant_pda,
+        &buyer,
+    )
+    .unwrap();
+
+    let participant_rent = ctx.get_account(participant_pda).unwrap().lamports;
+    assert!(participant_rent > 0);
+    let buyer_before = ctx.get_account(buyer.pubkey()).unwrap().lamports;
+    let nonce_ix = system_instruction::transfer(&ctx.payer.pubkey(), &buyer.pubkey(), 1);
+    let close_ix =
+        close_participant_ix(program_id, config_pda, lottery_pda, participant_pda, &buyer);
+    send_tx(&mut ctx, vec![nonce_ix, close_ix], &[&buyer]).unwrap();
+    let buyer_after = ctx.get_account(buyer.pubkey()).unwrap().lamports;
+    assert_eq!(buyer_after, buyer_before + participant_rent + 1);
+    assert_eq!(
+        ctx.get_account(participant_pda)
+            .map(|account| account.lamports)
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[test]
+fn refund_vault_can_close_after_all_refunds_claimed() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer_a = Keypair::new();
+    let buyer_b = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
+
+    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+
+    let participant_a = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_a,
+        b"close-refund-a",
+        1,
+    );
+    let participant_b = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_b,
+        b"close-refund-b",
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        1,
+        1,
+    );
+    force_clock_after_upload_deadline(&mut ctx, lottery_pda);
+
+    let finalize_no_attesters_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(authority.pubkey(), true),
+        ],
+        data: borsh::to_vec(&Instruction::FinalizeNoAttesters).unwrap(),
+    };
+    send_tx(&mut ctx, vec![finalize_no_attesters_ix], &[&authority]).unwrap();
+
+    claim_refund(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        participant_a,
+        &buyer_a,
+    )
+    .unwrap();
+
+    let close_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(config_pda, false),
+            AccountMeta::new_readonly(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(authority.pubkey(), false),
+        ],
+        data: borsh::to_vec(&Instruction::CloseRefundVault).unwrap(),
+    };
+    let early_close = send_tx(&mut ctx, vec![close_ix.clone()], &[])
+        .expect_err("refund vault should stay open until every participant claims");
+    assert_custom_error(early_close, Error::RefundUnavailable as u32);
+
+    claim_refund(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        participant_b,
+        &buyer_b,
+    )
+    .unwrap();
+
+    let authority_before = ctx.get_account(authority.pubkey()).unwrap().lamports;
+    let vault_rent = ctx.get_account(vault_pda).unwrap().lamports;
+    assert!(vault_rent > 0);
+    let nonce_ix = system_instruction::transfer(&ctx.payer.pubkey(), &authority.pubkey(), 1);
+    send_tx(&mut ctx, vec![nonce_ix, close_ix], &[]).unwrap();
+    let authority_after = ctx.get_account(authority.pubkey()).unwrap().lamports;
+    assert_eq!(authority_after, authority_before + vault_rent + 1);
+    assert_eq!(
+        ctx.get_account(vault_pda)
+            .map(|account| account.lamports)
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[test]
 fn participants_above_legacy_cap_can_finalize_in_chunks() {
     let program_id = Pubkey::new_unique();
     let authority = Keypair::new();
@@ -1110,7 +1453,8 @@ fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
     let buyer_b = Keypair::new();
     let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
 
-    let (config_pda, lottery_pda, vault_pda, _) = setup_lottery(&mut ctx, program_id, &authority);
+    let (config_pda, lottery_pda, vault_pda, vote_tally_pda) =
+        setup_lottery(&mut ctx, program_id, &authority);
 
     let secret_a = b"self-a\x1fsalt";
     let secret_b = b"self-b\x1fsalt";
@@ -1155,7 +1499,9 @@ fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
                 AccountMeta::new_readonly(config_pda, false),
                 AccountMeta::new(lottery_pda, false),
                 AccountMeta::new(participant, false),
-                AccountMeta::new_readonly(buyer.pubkey(), true),
+                AccountMeta::new(buyer.pubkey(), true),
+                AccountMeta::new(vote_tally_pda, false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&Instruction::AttestReveal {
                 voted_number_of_winners: 1,
@@ -1189,7 +1535,174 @@ fn participants_can_attest_with_onchain_reveal_without_provider_signature() {
 }
 
 #[test]
-fn settle_batch_with_invalid_proof_fails() {
+fn settle_payout_batch_does_not_require_authority_signature() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let buyer_a = Keypair::new();
+    let buyer_b = Keypair::new();
+    let mut ctx = TestContext::new(program_id, &[&authority, &buyer_a, &buyer_b]);
+
+    let (config_pda, lottery_pda, vault_pda, vote_tally_pda) =
+        setup_lottery(&mut ctx, program_id, &authority);
+
+    let secret_a = b"permissionless-settle-a";
+    let secret_b = b"permissionless-settle-b";
+    let participant_a = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_a,
+        secret_a,
+        1,
+    );
+    let participant_b = buy_tickets(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &buyer_b,
+        secret_b,
+        1,
+    );
+
+    begin_reveal_now(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        60,
+        60,
+    );
+    attest_uploaded(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_a,
+        &buyer_a,
+        &authority,
+        hash(secret_a).to_bytes(),
+        1,
+    );
+    attest_uploaded(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_b,
+        &buyer_b,
+        &authority,
+        hash(secret_b).to_bytes(),
+        1,
+    );
+    upload_reveals(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        &authority,
+        vote_tally_pda,
+        vec![
+            (participant_a, secret_a.to_vec()),
+            (participant_b, secret_b.to_vec()),
+        ],
+        vec![participant_a, participant_b],
+    );
+    finalize_winners_until_complete(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        vault_pda,
+        &authority,
+        &[participant_a, participant_b],
+        2,
+    );
+
+    let lot = load_lottery(&mut ctx, lottery_pda);
+    assert_eq!(lot.winners_count, 1);
+    let winner_page_pda = winner_page_pda(&program_id, &lottery_pda, 0);
+    let winner = load_winner(&mut ctx, winner_page_pda, 0);
+    let winner_before = ctx.get_account(winner).unwrap().lamports;
+    let authority_before = ctx.get_account(authority.pubkey()).unwrap().lamports;
+    let vault_before = ctx.get_account(vault_pda).unwrap().lamports;
+    let settle_ix = SdkIx {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(config_pda, false),
+            AccountMeta::new(lottery_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(authority.pubkey(), false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new(winner_page_pda, false),
+            AccountMeta::new(winner, false),
+        ],
+        data: borsh::to_vec(&Instruction::SettlePayoutBatch {
+            lottery_id: lot.id,
+            batch_index: 0,
+            winners: vec![WinnerProof {
+                index: 0,
+                recipient: winner,
+                amount: lot.total_payout,
+                merkle_proof: vec![],
+            }],
+        })
+        .unwrap(),
+    };
+    send_tx(&mut ctx, vec![settle_ix], &[]).unwrap();
+
+    let settled = load_lottery(&mut ctx, lottery_pda);
+    assert!(settled.settlement_complete);
+    assert_eq!(
+        ctx.get_account(winner).unwrap().lamports,
+        winner_before + lot.total_payout
+    );
+    assert!(
+        ctx.get_account(authority.pubkey()).unwrap().lamports > authority_before,
+        "authority should receive service fee, remainder, and vault rent"
+    );
+    assert_eq!(
+        ctx.get_account(vault_pda)
+            .map(|account| account.lamports)
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        winner_before
+            + lot.total_payout
+            + (ctx.get_account(authority.pubkey()).unwrap().lamports - authority_before),
+        winner_before + vault_before
+    );
+
+    let participant_a_rent = ctx.get_account(participant_a).unwrap().lamports;
+    let buyer_a_before_close = ctx.get_account(buyer_a.pubkey()).unwrap().lamports;
+    close_participant(
+        &mut ctx,
+        program_id,
+        config_pda,
+        lottery_pda,
+        participant_a,
+        &buyer_a,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.get_account(buyer_a.pubkey()).unwrap().lamports,
+        buyer_a_before_close + participant_a_rent
+    );
+    assert_eq!(
+        ctx.get_account(participant_a)
+            .map(|account| account.lamports)
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[test]
+fn settle_batch_with_mismatched_page_amount_fails() {
     let program_id = Pubkey::new_unique();
     let authority = Keypair::new();
     let buyer_a = Keypair::new();
@@ -1287,8 +1800,7 @@ fn settle_batch_with_invalid_proof_fails() {
     assert!(lot.winners_count > 0);
     assert!(lot.total_payout > 0);
 
-    let (winners_ledger_pda, _) =
-        Pubkey::find_program_address(&[b"winners_ledger", lottery_pda.as_ref()], &program_id);
+    let winner_page_pda = winner_page_pda(&program_id, &lottery_pda, 0);
     let invalid_winner = WinnerProof {
         index: 0,
         recipient: buyer_a.pubkey(),
@@ -1303,7 +1815,7 @@ fn settle_batch_with_invalid_proof_fails() {
             AccountMeta::new(vault_pda, false),
             AccountMeta::new(authority.pubkey(), true),
             AccountMeta::new_readonly(system_program::id(), false),
-            AccountMeta::new(winners_ledger_pda, false),
+            AccountMeta::new(winner_page_pda, false),
             AccountMeta::new(buyer_a.pubkey(), false),
         ],
         data: borsh::to_vec(&Instruction::SettlePayoutBatch {
@@ -1314,6 +1826,6 @@ fn settle_batch_with_invalid_proof_fails() {
         .unwrap(),
     };
     let err = send_tx(&mut ctx, vec![settle_ix], &[&authority])
-        .expect_err("settle payout should fail with invalid merkle proof");
-    assert_custom_error(err, Error::InvalidMerkleProof as u32);
+        .expect_err("settle payout should fail when the page amount does not match");
+    assert_custom_error(err, Error::InvalidInstruction as u32);
 }

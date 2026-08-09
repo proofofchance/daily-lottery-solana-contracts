@@ -2,6 +2,7 @@ mod common;
 
 use borsh::{to_vec, BorshDeserialize};
 use common::TestContext;
+use daily_lottery::state::{FinalizationLedger, WINNERS_PER_PAGE};
 use daily_lottery::*;
 use solana_ed25519_program::new_ed25519_instruction_with_signature;
 use solana_instruction::{AccountMeta, Instruction as SdkIx};
@@ -18,19 +19,31 @@ fn read_after_disc<T: BorshDeserialize>(data: &[u8]) -> T {
 }
 
 fn finalization_ledger_pda(program_id: &Pubkey, lottery_pda: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"finalization_ledger", lottery_pda.as_ref()], program_id).0
+    Pubkey::find_program_address(&[b"finalization_root_v2", lottery_pda.as_ref()], program_id).0
 }
 
-fn sorted_participants_by_wallet(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
+fn winner_page_pda(program_id: &Pubkey, lottery_pda: &Pubkey, page_index: u32) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            b"winner_page",
+            lottery_pda.as_ref(),
+            &page_index.to_le_bytes(),
+        ],
+        program_id,
+    )
+    .0
+}
+
+fn participants_by_index(ctx: &mut TestContext, participants: &[Pubkey]) -> Vec<Pubkey> {
     let mut keyed = participants
         .iter()
         .map(|participant_pda| {
             let account = ctx.get_account(*participant_pda).unwrap();
             let participant: Participant = read_after_disc(&account.data);
-            (participant.wallet, *participant_pda)
+            (participant.participant_index, *participant_pda)
         })
         .collect::<Vec<_>>();
-    keyed.sort_by(|left, right| left.0.to_bytes().cmp(&right.0.to_bytes()));
+    keyed.sort_by_key(|(participant_index, _)| *participant_index);
     keyed
         .into_iter()
         .map(|(_, participant)| participant)
@@ -47,6 +60,15 @@ fn finalize_winners_once(
     participant_accounts: &[Pubkey],
 ) {
     let finalization_ledger = finalization_ledger_pda(&program_id, &lottery_pda);
+    let page_index = ctx
+        .get_account(finalization_ledger)
+        .filter(|account| !account.data.is_empty())
+        .map(|account| {
+            let root: FinalizationLedger = read_after_disc(&account.data);
+            root.selected_count / WINNERS_PER_PAGE as u32
+        })
+        .unwrap_or(0);
+    let winner_page = winner_page_pda(&program_id, &lottery_pda, page_index);
     let mut accounts = vec![
         AccountMeta::new(config_pda, false),
         AccountMeta::new(lottery_pda, false),
@@ -54,6 +76,7 @@ fn finalize_winners_once(
         AccountMeta::new(authority.pubkey(), true),
         AccountMeta::new_readonly(system_program::id(), false),
         AccountMeta::new(finalization_ledger, false),
+        AccountMeta::new(winner_page, false),
     ];
     for participant in participant_accounts {
         accounts.push(AccountMeta::new(*participant, false));
@@ -262,7 +285,7 @@ fn full_flow_attest_upload_settle() {
 
     ctx.warp_to_slot(200_000);
 
-    let sorted_participants = sorted_participants_by_wallet(&mut ctx, &[part_a_pda, part_b_pda]);
+    let sorted_participants = participants_by_index(&mut ctx, &[part_a_pda, part_b_pda]);
     assert_eq!(sorted_participants.len(), 2);
     finalize_winners_once(
         &mut ctx,

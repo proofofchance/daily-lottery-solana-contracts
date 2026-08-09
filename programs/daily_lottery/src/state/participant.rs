@@ -57,6 +57,27 @@ pub struct Participant {
     /// Score derived from the revealed lucky phrase (character count after lowercase+trim)
     /// Set during UploadReveals; informational only (not used for payout entropy)
     pub reveal_score: u64,
+
+    /// Immutable zero-based join order within the lottery.
+    ///
+    /// Settlement requires this exact sequence so a permissionless caller cannot
+    /// skip an earlier participant and poison a resumable finalization cursor.
+    pub participant_index: u64,
+
+    /// Domain-separated digest of the verified reveal plaintext.
+    ///
+    /// The finalization pass folds these digests in participant-index order,
+    /// making the settlement commitment independent of upload batching/order.
+    pub reveal_digest: [u8; 32],
+
+    /// Protocol-v2 finalization pass that processed this participant.
+    pub finalization_generation: u32,
+
+    /// Protocol-v2 generation in which this wallet was selected.
+    pub selected_generation: u32,
+
+    /// Draw round in which this wallet was selected.
+    pub selected_round: u32,
 }
 
 impl Participant {
@@ -72,6 +93,7 @@ impl Participant {
         wallet: Pubkey,
         proof_of_chance_hash: [u8; 32],
         initial_tickets: u64,
+        participant_index: u64,
     ) -> Self {
         Self {
             lottery,
@@ -82,6 +104,11 @@ impl Participant {
             attested_at_unix: 0,
             voted_number_of_winners: 0,
             reveal_score: 0,
+            participant_index,
+            reveal_digest: [0; 32],
+            finalization_generation: 0,
+            selected_generation: 0,
+            selected_round: 0,
         }
     }
 
@@ -153,6 +180,11 @@ impl Participant {
         self.voted_number_of_winners |= Self::REVEAL_INCLUDED_FLAG;
     }
 
+    pub fn include_verified_reveal(&mut self, digest: [u8; 32]) {
+        self.reveal_digest = digest;
+        self.mark_reveal_included();
+    }
+
     /// Returns true if this participant has been processed during settlement.
     pub fn settlement_included(&self) -> bool {
         (self.voted_number_of_winners & Self::SETTLEMENT_INCLUDED_FLAG) != 0
@@ -178,6 +210,19 @@ impl Participant {
         self.tickets_bought > 0
     }
 
+    pub fn mark_finalized_for_generation(&mut self, generation: u32) {
+        self.finalization_generation = generation;
+    }
+
+    pub fn selected_in_generation(&self, generation: u32) -> bool {
+        generation != 0 && self.selected_generation == generation
+    }
+
+    pub fn mark_selected(&mut self, generation: u32, round: u32) {
+        self.selected_generation = generation;
+        self.selected_round = round;
+    }
+
     /// Gets the participant's ticket range for winner selection
     /// Returns (start_index, end_index) where end is exclusive
     pub fn get_ticket_range(&self, previous_total: u64) -> (u64, u64) {
@@ -198,11 +243,12 @@ mod tests {
         let wallet = Pubkey::new_unique();
         let proof_hash = [1u8; 32];
 
-        let participant = Participant::new(lottery, wallet, proof_hash, 5);
+        let participant = Participant::new(lottery, wallet, proof_hash, 5, 0);
 
         assert_eq!(participant.lottery, lottery);
         assert_eq!(participant.wallet, wallet);
         assert_eq!(participant.proof_of_chance_hash, proof_hash);
+        assert_eq!(participant.participant_index, 0);
         assert_eq!(participant.tickets_bought, 5);
         assert!(!participant.attested_uploaded);
         assert!(!participant.is_new());

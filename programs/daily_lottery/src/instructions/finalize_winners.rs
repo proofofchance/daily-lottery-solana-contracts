@@ -1,19 +1,19 @@
-//! # Finalize Winners Instruction
-//!
-//! Computes lottery winners over chunked participant scans and stores the
-//! winners merkle root on-chain. Finalization never requires every participant
-//! account in one transaction.
+//! Permissionless, fixed-account protocol-v2 daily-lottery finalization.
 
 use crate::{
     error::Error,
     events::LotteryEvent,
     state::{
-        Config, FinalizationLedger, Lottery, Participant, Vault, FINALIZATION_PHASE_AGGREGATING,
-        FINALIZATION_PHASE_COMPLETED, FINALIZATION_PHASE_SELECTING,
+        Config, FinalizationLedger, Lottery, Participant, SelectedWinner, Vault, WinnerPage,
+        FINALIZATION_PHASE_AGGREGATING, FINALIZATION_PHASE_COMPLETED, FINALIZATION_PHASE_SELECTING,
+        FINALIZATION_PROTOCOL_VERSION, WINNERS_PER_PAGE,
     },
     utils::{
         account::{read_account_data, write_account_data},
-        pda::{assert_pda_key, assert_pda_owned, derive_finalization_ledger_pda},
+        pda::{
+            assert_pda_key, assert_pda_owned, derive_finalization_ledger_pda,
+            derive_participant_pda, derive_winner_page_pda,
+        },
         validation::{compute_service_fee, require_key_match, require_signer, require_writable},
     },
 };
@@ -30,35 +30,34 @@ use solana_program::{
 use solana_system_interface::{instruction as system_instruction, program as system_program};
 use std::fmt::Write as _;
 
-pub const WINNER_ALGO_RULE_VERSION: &str = "reveal-plaintext-draw-v3-chunked";
-const RPD_V3_POOL_DOMAIN: &[u8] = b"IKIGAI_RPD_V3_POOL";
-const RPD_V3_SEED_DOMAIN: &[u8] = b"IKIGAI_RPD_V3_SEED";
-const RPD_V3_DRAW_DOMAIN: &[u8] = b"IKIGAI_RPD_V3_DRAW";
+pub const WINNER_ALGO_RULE_VERSION: &str = "reveal-plaintext-draw-v6-indexed";
+const RPD_POOL_DOMAIN: &[u8] = b"IKIGAI_RPD_V3_POOL";
+const RPD_SEED_DOMAIN: &[u8] = b"IKIGAI_RPD_V3_SEED";
+const RPD_DRAW_DOMAIN: &[u8] = b"IKIGAI_RPD_V3_DRAW";
 
-/// Finalize winners and store commitment on-chain.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-
     let config_ai = next_account_info(account_info_iter)?;
     let lottery_ai = next_account_info(account_info_iter)?;
     let vault_ai = next_account_info(account_info_iter)?;
-    let authority_ai = next_account_info(account_info_iter)?;
+    let payer_ai = next_account_info(account_info_iter)?;
     let system_program_ai = next_account_info(account_info_iter)?;
-    let finalization_ledger_ai = next_account_info(account_info_iter)?;
-
+    let finalization_root_ai = next_account_info(account_info_iter)?;
+    let winner_page_ai = next_account_info(account_info_iter)?;
     let participant_accounts: Vec<&AccountInfo> = account_info_iter.collect();
 
     assert_pda_owned(program_id, config_ai, &[b"config"])?;
     require_writable(lottery_ai)?;
     require_writable(vault_ai)?;
-    require_signer(authority_ai)?;
-    require_writable(authority_ai)?;
+    require_signer(payer_ai)?;
+    require_writable(payer_ai)?;
+    require_writable(finalization_root_ai)?;
+    require_writable(winner_page_ai)?;
     require_key_match(system_program_ai, &system_program::id())?;
 
     let config: Config = read_account_data(config_ai)?;
     let mut lottery: Lottery = read_account_data(lottery_ai)?;
     let _vault: Vault = read_account_data(vault_ai)?;
-
     assert_pda_owned(
         program_id,
         lottery_ai,
@@ -69,36 +68,21 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         ],
     )?;
     assert_pda_owned(program_id, vault_ai, &[b"vault", lottery_ai.key.as_ref()])?;
-
-    if authority_ai.key != &config.authority {
-        return Err(Error::Unauthorized.into());
-    }
+    require_key_match(vault_ai, &lottery.vault)?;
 
     if lottery.settlement_complete || lottery.settled {
-        return Err(Error::LotteryAlreadySettled.into());
+        return Ok(());
     }
-    if lottery.winners_count > 0
-        || lottery.winners_merkle_root != [0u8; 32]
-        || lottery.total_payout > 0
-        || lottery.settlement_batches_completed > 0
-    {
-        return Err(Error::InvalidLotteryState.into());
-    }
-
     if lottery.participants_count <= 1 {
         return Err(Error::InvalidInstruction.into());
     }
-
     if lottery.attested_count == 0 {
         return Err(Error::NoAttestedParticipants.into());
     }
 
-    let clock = Clock::get()?;
-    let current_time = clock.unix_timestamp;
-    let current_phase = lottery.phase(current_time);
+    let current_time = Clock::get()?.unix_timestamp;
     let upload_elapsed =
         lottery.upload_deadline_unix > 0 && current_time > lottery.upload_deadline_unix;
-
     if lottery.has_missing_attested_reveals() {
         if upload_elapsed && lottery.remediation_start_unix == 0 {
             lottery.begin_remediation(current_time);
@@ -115,420 +99,414 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
             .emit();
             return Ok(());
         }
-
         return Err(Error::InvalidPhaseTransition.into());
     }
-
-    if lottery.attested_reveals_complete() && !lottery.uploads_complete {
-        lottery.uploads_complete = true;
-    }
-
-    if current_phase != "settlement" && current_phase != "settled" && !upload_elapsed {
-        return Err(Error::InvalidInstruction.into());
-    }
-
     if !lottery.uploads_complete && !upload_elapsed {
         return Err(Error::InvalidInstruction.into());
     }
-
-    if lottery.total_tickets == 0 {
-        lottery.settle();
-        write_account_data(lottery_ai, "Lottery", &lottery)?;
-        LotteryEvent::NoBuyersConcluded {
-            lottery_id: lottery.id,
-            lottery: lottery_ai.key.to_string(),
-            timestamp: current_time,
-        }
-        .emit();
-        return Ok(());
-    }
-
     if participant_accounts.is_empty() {
         return Err(Error::MissingAccount.into());
     }
 
-    let mut finalization_ledger = load_or_create_finalization_ledger(
+    let mut root = load_or_create_root(
         program_id,
         lottery_ai,
-        authority_ai,
+        payer_ai,
         system_program_ai,
-        finalization_ledger_ai,
-        &config,
+        finalization_root_ai,
         &lottery,
         current_time,
     )?;
 
-    let (batch_size, processed_count, required_count, completed) = match finalization_ledger.phase {
+    let expected_page_index = root.selected_count / WINNERS_PER_PAGE as u32;
+    assert_winner_page_key(program_id, lottery_ai, winner_page_ai, expected_page_index)?;
+
+    let (batch_size, processed_count, required_count, completed) = match root.phase {
         FINALIZATION_PHASE_AGGREGATING => process_aggregation_chunk(
             program_id,
             lottery_ai,
+            &config,
             &mut lottery,
-            &mut finalization_ledger,
+            &mut root,
             &participant_accounts,
-            current_time,
         )?,
         FINALIZATION_PHASE_SELECTING => process_selection_chunk(
             program_id,
             lottery_ai,
+            payer_ai,
+            system_program_ai,
+            winner_page_ai,
             &mut lottery,
-            &mut finalization_ledger,
+            &mut root,
             &participant_accounts,
             current_time,
         )?,
-        FINALIZATION_PHASE_COMPLETED => return Err(Error::LotteryAlreadySettled.into()),
+        FINALIZATION_PHASE_COMPLETED => return Ok(()),
         _ => return Err(Error::InvalidAccountData.into()),
     };
 
-    let phase = phase_name(finalization_ledger.phase).to_string();
     LotteryEvent::FinalizationChunkProcessed {
         lottery_id: lottery.id,
         lottery: lottery_ai.key.to_string(),
-        finalization_ledger: finalization_ledger_ai.key.to_string(),
-        phase,
+        finalization_ledger: finalization_root_ai.key.to_string(),
+        phase: phase_name(root.phase).to_string(),
         batch_size,
         processed_count,
         required_count,
-        eligible_count: finalization_ledger.eligible_count,
-        total_eligible_tickets: finalization_ledger.total_eligible_tickets,
-        current_round: finalization_ledger.current_round,
-        target_winners: finalization_ledger.target_winners,
-        selected_winners_count: finalization_ledger.winners.len() as u64,
+        eligible_count: root.eligible_count,
+        total_eligible_tickets: root.total_eligible_tickets,
+        current_round: root.current_round as u64,
+        target_winners: root.target_winners as u64,
+        selected_winners_count: root.selected_count as u64,
         completed,
         timestamp: current_time,
     }
     .emit();
 
-    write_account_data(
-        finalization_ledger_ai,
-        "FinalizationLedger",
-        &finalization_ledger,
-    )?;
+    write_account_data(finalization_root_ai, "FinalizationLedger", &root)?;
     write_account_data(lottery_ai, "Lottery", &lottery)?;
-
     Ok(())
 }
 
-fn load_or_create_finalization_ledger<'a>(
+fn load_or_create_root<'a>(
     program_id: &Pubkey,
     lottery_ai: &AccountInfo<'a>,
-    authority_ai: &AccountInfo<'a>,
+    payer_ai: &AccountInfo<'a>,
     system_program_ai: &AccountInfo<'a>,
-    finalization_ledger_ai: &AccountInfo<'a>,
-    config: &Config,
+    root_ai: &AccountInfo<'a>,
     lottery: &Lottery,
     current_time: i64,
 ) -> Result<FinalizationLedger, solana_program::program_error::ProgramError> {
-    let (expected_ledger_pda, bump) = derive_finalization_ledger_pda(program_id, lottery_ai.key);
-    if &expected_ledger_pda != finalization_ledger_ai.key {
+    let (expected, bump) = derive_finalization_ledger_pda(program_id, lottery_ai.key);
+    if expected != *root_ai.key {
         return Err(Error::InvalidSeeds.into());
     }
-
-    let max_winners = config.effective_max_winners(lottery.participants_count);
-
-    if finalization_ledger_ai.data_is_empty() {
-        assert_pda_key(
-            program_id,
-            finalization_ledger_ai,
-            &[b"finalization_ledger", lottery_ai.key.as_ref()],
-        )?;
-        let ledger_space = FinalizationLedger::size_for(max_winners as usize);
-        let lamports = Rent::get()?.minimum_balance(ledger_space);
+    if root_ai.data_is_empty() {
+        let lamports = Rent::get()?.minimum_balance(FinalizationLedger::SIZE);
         let create_ix = system_instruction::create_account(
-            authority_ai.key,
-            finalization_ledger_ai.key,
+            payer_ai.key,
+            root_ai.key,
             lamports,
-            ledger_space as u64,
+            FinalizationLedger::SIZE as u64,
             program_id,
         );
         invoke_signed(
             &create_ix,
-            &[
-                authority_ai.clone(),
-                finalization_ledger_ai.clone(),
-                system_program_ai.clone(),
-            ],
-            &[&[b"finalization_ledger", lottery_ai.key.as_ref(), &[bump]]],
+            &[payer_ai.clone(), root_ai.clone(), system_program_ai.clone()],
+            &[&[b"finalization_root_v2", lottery_ai.key.as_ref(), &[bump]]],
         )?;
         return Ok(FinalizationLedger::new(
             *lottery_ai.key,
-            max_winners,
+            lottery.participants_count,
             current_time,
         ));
     }
-
     assert_pda_owned(
         program_id,
-        finalization_ledger_ai,
-        &[b"finalization_ledger", lottery_ai.key.as_ref()],
+        root_ai,
+        &[b"finalization_root_v2", lottery_ai.key.as_ref()],
     )?;
-    let ledger: FinalizationLedger = read_account_data(finalization_ledger_ai)?;
-    if ledger.lottery != *lottery_ai.key || ledger.max_winners != max_winners {
+    let root: FinalizationLedger = read_account_data(root_ai)?;
+    if root.lottery != *lottery_ai.key
+        || root.protocol_version != FINALIZATION_PROTOCOL_VERSION
+        || root.required_count != lottery.participants_count
+    {
         return Err(Error::InvalidAccountData.into());
     }
-
-    Ok(ledger)
+    Ok(root)
 }
 
 fn process_aggregation_chunk(
     program_id: &Pubkey,
     lottery_ai: &AccountInfo,
+    config: &Config,
     lottery: &mut Lottery,
-    finalization_ledger: &mut FinalizationLedger,
+    root: &mut FinalizationLedger,
     participant_accounts: &[&AccountInfo],
-    current_time: i64,
 ) -> Result<(u64, u64, u64, bool), solana_program::program_error::ProgramError> {
     let mut batch_size = 0u64;
-
-    for participant_ai in participant_accounts.iter() {
+    for participant_ai in participant_accounts {
         require_writable(participant_ai)?;
         let mut participant = read_valid_participant(program_id, lottery_ai, participant_ai)?;
-        require_sorted_wallet(finalization_ledger, &participant.wallet)?;
-
-        if !participant.reveal_included()
-            || participant.settlement_included()
-            || participant.tickets_bought == 0
+        require_participant_index(root.processed_count, participant.participant_index)?;
+        if participant.tickets_bought == 0 || participant.finalization_generation == root.generation
         {
             return Err(Error::InvalidAccountData.into());
         }
-
-        participant.mark_settlement_included();
-        finalization_ledger.processed_count = finalization_ledger
+        participant.mark_finalized_for_generation(root.generation);
+        root.processed_count = root
             .processed_count
             .checked_add(1)
             .ok_or(Error::MathOverflow)?;
-        finalization_ledger.eligible_count = finalization_ledger
-            .eligible_count
-            .checked_add(1)
-            .ok_or(Error::MathOverflow)?;
-        finalization_ledger.total_eligible_tickets = finalization_ledger
-            .total_eligible_tickets
-            .checked_add(participant.tickets_bought)
-            .ok_or(Error::MathOverflow)?;
-        finalization_ledger.participants_commitment = extend_participants_commitment(
-            finalization_ledger.participants_commitment,
-            &participant.wallet,
-            participant.tickets_bought,
-        );
-        finalization_ledger.add_vote(
-            participant.voted_winners(),
-            participant.tickets_bought as u128,
-            participant.attested_at_unix,
-        );
-
+        if participant.reveal_included() {
+            root.eligible_count = root
+                .eligible_count
+                .checked_add(1)
+                .ok_or(Error::MathOverflow)?;
+            root.total_eligible_tickets = root
+                .total_eligible_tickets
+                .checked_add(participant.tickets_bought)
+                .ok_or(Error::MathOverflow)?;
+            root.participants_commitment = extend_participants_commitment(
+                root.participants_commitment,
+                participant.participant_index,
+                &participant.wallet,
+                participant.tickets_bought,
+                participant.reveal_digest,
+            );
+        }
         write_account_data(participant_ai, "Participant", &participant)?;
         batch_size = batch_size.checked_add(1).ok_or(Error::MathOverflow)?;
     }
-
-    if finalization_ledger.processed_count > lottery.provider_uploaded_count {
+    if root.processed_count > root.required_count {
         return Err(Error::InvalidInstruction.into());
     }
-
-    let mut completed = false;
-    if finalization_ledger.processed_count == lottery.provider_uploaded_count {
-        if finalization_ledger.eligible_count == 0
-            || finalization_ledger.total_eligible_tickets == 0
-        {
-            return Err(Error::WinnerNotFound.into());
+    if root.processed_count == root.required_count {
+        if root.eligible_count == 0 || root.total_eligible_tickets == 0 {
+            return Err(Error::NoAttestedParticipants.into());
         }
-
-        let selected_count = finalization_ledger
-            .selected_winner_count(lottery.participants_count)
-            .min(finalization_ledger.eligible_count)
-            .min(finalization_ledger.max_winners);
-        if selected_count == 0 {
-            return Err(Error::WinnerNotFound.into());
-        }
-
-        finalization_ledger.target_winners = selected_count;
-        lottery.set_selected_winners(selected_count)?;
-        finalization_ledger.seed = compute_seed_rpd_v3(
+        let target = lottery
+            .selected_number_of_winners
+            .max(1)
+            .min(config.effective_max_winners(lottery.participants_count))
+            .min(root.eligible_count);
+        root.target_winners = u32::try_from(target).map_err(|_| Error::MathOverflow)?;
+        lottery.set_selected_winners(target)?;
+        root.seed = compute_seed(
             lottery.id,
-            finalization_ledger.eligible_count,
-            finalization_ledger.total_eligible_tickets,
+            root.eligible_count,
+            root.total_eligible_tickets,
             lottery.poc_aggregate_hash,
-            finalization_ledger.participants_commitment,
+            root.participants_commitment,
         );
-        let draw_index = draw_index_rpd_v3(
-            &finalization_ledger.seed,
-            0,
-            finalization_ledger.remaining_tickets()?,
-        )?;
-        finalization_ledger.current_round = 0;
-        finalization_ledger.begin_selection_round(draw_index);
-
-        if lottery.settlement_start_unix == 0 {
-            lottery.settlement_start_unix = current_time;
-        }
-        completed = false;
+        let draw = draw_index(&root.seed, 0, root.remaining_tickets()?)?;
+        root.current_round = 0;
+        root.begin_selection_round(draw);
     }
-
-    Ok((
-        batch_size,
-        finalization_ledger.processed_count,
-        lottery.provider_uploaded_count,
-        completed,
-    ))
+    Ok((batch_size, root.processed_count, root.required_count, false))
 }
 
-fn process_selection_chunk(
+#[allow(clippy::too_many_arguments)]
+fn process_selection_chunk<'a>(
     program_id: &Pubkey,
-    lottery_ai: &AccountInfo,
+    lottery_ai: &AccountInfo<'a>,
+    payer_ai: &AccountInfo<'a>,
+    system_program_ai: &AccountInfo<'a>,
+    winner_page_ai: &AccountInfo<'a>,
     lottery: &mut Lottery,
-    finalization_ledger: &mut FinalizationLedger,
-    participant_accounts: &[&AccountInfo],
+    root: &mut FinalizationLedger,
+    participant_accounts: &[&AccountInfo<'a>],
     current_time: i64,
 ) -> Result<(u64, u64, u64, bool), solana_program::program_error::ProgramError> {
     let mut batch_size = 0u64;
-
-    for participant_ai in participant_accounts.iter() {
-        let participant = read_valid_participant(program_id, lottery_ai, participant_ai)?;
-        require_sorted_wallet(finalization_ledger, &participant.wallet)?;
-
-        if !participant.reveal_included()
-            || !participant.settlement_included()
-            || participant.tickets_bought == 0
+    for participant_ai in participant_accounts {
+        require_writable(participant_ai)?;
+        let mut participant = read_valid_participant(program_id, lottery_ai, participant_ai)?;
+        require_participant_index(root.round_processed_count, participant.participant_index)?;
+        if participant.finalization_generation != root.generation || participant.tickets_bought == 0
         {
             return Err(Error::InvalidAccountData.into());
         }
-
-        finalization_ledger.round_processed_count = finalization_ledger
+        root.round_processed_count = root
             .round_processed_count
             .checked_add(1)
             .ok_or(Error::MathOverflow)?;
-
-        if !finalization_ledger.has_selected(&participant.wallet) {
-            let start = finalization_ledger.round_remaining_tickets_seen;
+        if participant.reveal_included() && !participant.selected_in_generation(root.generation) {
+            let start = root.round_remaining_tickets_seen;
             let end = start
                 .checked_add(participant.tickets_bought)
                 .ok_or(Error::MathOverflow)?;
-            if !finalization_ledger.round_winner_found
-                && finalization_ledger.round_draw_index >= start
-                && finalization_ledger.round_draw_index < end
+            if !root.pending_winner_found
+                && root.round_draw_index >= start
+                && root.round_draw_index < end
             {
-                finalization_ledger.round_winner_wallet = participant.wallet;
-                finalization_ledger.round_winner_tickets = participant.tickets_bought;
-                finalization_ledger.round_winner_found = true;
+                root.pending_winner = participant.wallet;
+                root.pending_winner_tickets = participant.tickets_bought;
+                root.pending_winner_found = true;
+                participant.mark_selected(root.generation, root.current_round);
+                write_account_data(participant_ai, "Participant", &participant)?;
             }
-            finalization_ledger.round_remaining_tickets_seen = end;
+            root.round_remaining_tickets_seen = end;
         }
-
         batch_size = batch_size.checked_add(1).ok_or(Error::MathOverflow)?;
     }
-
-    if finalization_ledger.round_processed_count > finalization_ledger.eligible_count {
+    if root.round_processed_count > root.required_count {
         return Err(Error::InvalidInstruction.into());
     }
-
     let mut completed = false;
-    if finalization_ledger.round_processed_count == finalization_ledger.eligible_count {
-        let expected_remaining_tickets = finalization_ledger.remaining_tickets()?;
-        if finalization_ledger.round_remaining_tickets_seen != expected_remaining_tickets {
-            return Err(Error::InvalidInstruction.into());
-        }
-        if !finalization_ledger.round_winner_found {
+    if root.round_processed_count == root.required_count {
+        let expected = root.remaining_tickets()?;
+        if root.round_remaining_tickets_seen != expected || !root.pending_winner_found {
             return Err(Error::WinnerNotFound.into());
         }
-
-        finalization_ledger.push_winner(
-            finalization_ledger.round_winner_wallet,
-            finalization_ledger.round_winner_tickets,
+        let winner = SelectedWinner {
+            wallet: root.pending_winner,
+            tickets: root.pending_winner_tickets,
+        };
+        let winner_index = root.selected_count as u64;
+        let page_index = root.selected_count / WINNERS_PER_PAGE as u32;
+        let page_offset = root.selected_count % WINNERS_PER_PAGE as u32;
+        let mut page = load_or_create_winner_page(
+            program_id,
+            lottery_ai,
+            payer_ai,
+            system_program_ai,
+            winner_page_ai,
+            root.generation,
+            page_index,
         )?;
+        {
+            let mut page_data = winner_page_ai.try_borrow_mut_data()?;
+            page.append(&mut page_data, winner)?;
+        }
+        write_account_data(winner_page_ai, "WinnerPage", &page)?;
+        root.record_winner(winner)?;
+        let (participant, _) = derive_participant_pda(program_id, lottery_ai.key, &winner.wallet);
+        LotteryEvent::WinnerSelected {
+            lottery_id: lottery.id,
+            lottery: lottery_ai.key.to_string(),
+            participant: participant.to_string(),
+            winner: winner.wallet.to_string(),
+            winner_index,
+            tickets: winner.tickets,
+            page_index,
+            page_offset,
+            timestamp: current_time,
+        }
+        .emit();
 
-        if finalization_ledger.winners.len() == finalization_ledger.target_winners as usize {
-            complete_finalization(lottery_ai, lottery, finalization_ledger, current_time)?;
+        if root.selected_count == root.target_winners {
+            complete_finalization(lottery_ai, lottery, root, current_time)?;
             completed = true;
         } else {
-            finalization_ledger.current_round = finalization_ledger
+            root.current_round = root
                 .current_round
                 .checked_add(1)
                 .ok_or(Error::MathOverflow)?;
-            let remaining_tickets = finalization_ledger.remaining_tickets()?;
-            let draw_index = draw_index_rpd_v3(
-                &finalization_ledger.seed,
-                finalization_ledger.current_round,
-                remaining_tickets,
-            )?;
-            finalization_ledger.begin_selection_round(draw_index);
+            let draw = draw_index(&root.seed, root.current_round, root.remaining_tickets()?)?;
+            root.begin_selection_round(draw);
         }
     }
+    let processed_count = if completed {
+        root.required_count
+    } else {
+        root.round_processed_count
+    };
+    Ok((batch_size, processed_count, root.required_count, completed))
+}
 
-    Ok((
-        batch_size,
-        finalization_ledger.round_processed_count,
-        finalization_ledger.eligible_count,
-        completed,
-    ))
+#[allow(clippy::too_many_arguments)]
+fn load_or_create_winner_page<'a>(
+    program_id: &Pubkey,
+    lottery_ai: &AccountInfo<'a>,
+    payer_ai: &AccountInfo<'a>,
+    system_program_ai: &AccountInfo<'a>,
+    page_ai: &AccountInfo<'a>,
+    generation: u32,
+    page_index: u32,
+) -> Result<WinnerPage, solana_program::program_error::ProgramError> {
+    let (_, bump) = derive_winner_page_pda(program_id, lottery_ai.key, page_index);
+    assert_winner_page_key(program_id, lottery_ai, page_ai, page_index)?;
+    if page_ai.data_is_empty() {
+        let lamports = Rent::get()?.minimum_balance(WinnerPage::SIZE);
+        let create_ix = system_instruction::create_account(
+            payer_ai.key,
+            page_ai.key,
+            lamports,
+            WinnerPage::SIZE as u64,
+            program_id,
+        );
+        invoke_signed(
+            &create_ix,
+            &[payer_ai.clone(), page_ai.clone(), system_program_ai.clone()],
+            &[&[
+                b"winner_page",
+                lottery_ai.key.as_ref(),
+                &page_index.to_le_bytes(),
+                &[bump],
+            ]],
+        )?;
+        return Ok(WinnerPage::new(*lottery_ai.key, generation, page_index));
+    }
+    assert_pda_owned(
+        program_id,
+        page_ai,
+        &[
+            b"winner_page",
+            lottery_ai.key.as_ref(),
+            &page_index.to_le_bytes(),
+        ],
+    )?;
+    let page: WinnerPage = read_account_data(page_ai)?;
+    if page.lottery != *lottery_ai.key
+        || page.generation != generation
+        || page.page_index != page_index
+    {
+        return Err(Error::InvalidAccountData.into());
+    }
+    Ok(page)
+}
+
+fn assert_winner_page_key(
+    program_id: &Pubkey,
+    lottery_ai: &AccountInfo,
+    page_ai: &AccountInfo,
+    page_index: u32,
+) -> ProgramResult {
+    assert_pda_key(
+        program_id,
+        page_ai,
+        &[
+            b"winner_page",
+            lottery_ai.key.as_ref(),
+            &page_index.to_le_bytes(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn complete_finalization(
     lottery_ai: &AccountInfo,
     lottery: &mut Lottery,
-    finalization_ledger: &mut FinalizationLedger,
+    root: &mut FinalizationLedger,
     current_time: i64,
-) -> Result<(), solana_program::program_error::ProgramError> {
+) -> ProgramResult {
+    let winners_count = root.selected_count as u64;
     let service_fee = compute_service_fee(lottery.total_funds, lottery.service_charge_bps)?;
     let winners_pool = lottery.total_funds.saturating_sub(service_fee);
-    let winners_len = finalization_ledger.winners.len();
-    if winners_len == 0 {
-        return Err(Error::WinnerNotFound.into());
-    }
-    if winners_pool < winners_len as u64 {
+    if winners_count == 0 || winners_pool < winners_count {
         return Err(Error::InsufficientFunds.into());
     }
-
-    let per_winner_payout = winners_pool / (winners_len as u64);
-    let total_winners_payout = per_winner_payout
-        .checked_mul(winners_len as u64)
+    let per_winner = winners_pool / winners_count;
+    let total_payout = per_winner
+        .checked_mul(winners_count)
         .ok_or(Error::MathOverflow)?;
-
-    let winner_entries: Vec<WinnerEntry> = finalization_ledger
-        .winners
-        .iter()
-        .enumerate()
-        .map(|(index, winner)| WinnerEntry {
-            index: index as u64,
-            recipient: winner.wallet,
-            amount: per_winner_payout,
-        })
-        .collect();
-    let merkle_root = build_winners_merkle_tree(&winner_entries);
-
-    lottery.initialize_settlement(merkle_root, winners_len as u64, total_winners_payout)?;
+    lottery.initialize_settlement(root.winners_commitment, winners_count, total_payout)?;
     if lottery.settlement_start_unix == 0 {
         lottery.settlement_start_unix = current_time;
     }
-    finalization_ledger.complete(current_time);
-
-    let seed_hex = bytes_to_hex(&finalization_ledger.seed);
-    let winner_wallets: Vec<String> = finalization_ledger
-        .winners
-        .iter()
-        .map(|winner| winner.wallet.to_string())
-        .collect();
-
+    root.complete(current_time);
     LotteryEvent::WinnersComputed {
         lottery_id: lottery.id,
         lottery: lottery_ai.key.to_string(),
-        seed: seed_hex,
+        seed: bytes_to_hex(&root.seed),
         rule_version: WINNER_ALGO_RULE_VERSION.to_string(),
-        total_eligible: finalization_ledger.eligible_count,
-        winners: winner_wallets.clone(),
+        total_eligible: root.eligible_count,
+        winners: vec![],
         timestamp: current_time,
     }
     .emit();
-
     LotteryEvent::WinnersFinalized {
         lottery_id: lottery.id,
         lottery: lottery_ai.key.to_string(),
-        winners_count: winners_len as u64,
-        total_payout: total_winners_payout,
-        per_winner_payout,
-        winners_merkle_root: merkle_root,
-        winners: winner_wallets,
+        winners_count,
+        total_payout,
+        per_winner_payout: per_winner,
+        winners_merkle_root: root.winners_commitment,
+        winners: vec![],
         timestamp: current_time,
     }
     .emit();
-
     Ok(())
 }
 
@@ -553,132 +531,76 @@ fn read_valid_participant(
     Ok(participant)
 }
 
-fn require_sorted_wallet(
-    finalization_ledger: &mut FinalizationLedger,
-    wallet: &Pubkey,
-) -> Result<(), Error> {
-    if finalization_ledger.has_last_wallet
-        && wallet.to_bytes() <= finalization_ledger.last_processed_wallet.to_bytes()
-    {
+fn require_participant_index(expected: u64, actual: u64) -> Result<(), Error> {
+    if actual != expected {
         return Err(Error::InvalidInstruction);
     }
-    finalization_ledger.last_processed_wallet = *wallet;
-    finalization_ledger.has_last_wallet = true;
     Ok(())
 }
 
 fn extend_participants_commitment(
-    current_commitment: [u8; 32],
+    current: [u8; 32],
+    participant_index: u64,
     wallet: &Pubkey,
     tickets: u64,
+    reveal_digest: [u8; 32],
 ) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(RPD_V3_POOL_DOMAIN);
-    h.update(current_commitment);
+    h.update(RPD_POOL_DOMAIN);
+    h.update(current);
+    h.update(participant_index.to_le_bytes());
     h.update(wallet.to_bytes());
     h.update(tickets.to_le_bytes());
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&h.finalize());
-    result
+    h.update(reveal_digest);
+    h.finalize().into()
 }
 
-fn compute_seed_rpd_v3(
+fn compute_seed(
     lottery_id: u64,
     eligible_count: u64,
-    total_eligible_tickets: u64,
-    poc_aggregate_hash: [u8; 32],
+    total_tickets: u64,
+    aggregate: [u8; 32],
     participants_commitment: [u8; 32],
 ) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(RPD_V3_SEED_DOMAIN);
+    h.update(RPD_SEED_DOMAIN);
     h.update(lottery_id.to_le_bytes());
     h.update(eligible_count.to_le_bytes());
-    h.update(total_eligible_tickets.to_le_bytes());
-    h.update(poc_aggregate_hash);
+    h.update(total_tickets.to_le_bytes());
+    h.update(aggregate);
     h.update(participants_commitment);
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&h.finalize());
-    seed
+    h.finalize().into()
 }
 
-fn draw_index_rpd_v3(
-    seed: &[u8; 32],
-    round: u64,
-    total_remaining_tickets: u64,
-) -> Result<u64, Error> {
-    if total_remaining_tickets == 0 {
+fn draw_index(seed: &[u8; 32], round: u32, remaining: u64) -> Result<u64, Error> {
+    if remaining == 0 {
         return Err(Error::InvalidInstruction);
     }
-
-    let mut h = Sha256::new();
-    h.update(RPD_V3_DRAW_DOMAIN);
-    h.update(seed);
-    h.update(round.to_le_bytes());
-    let digest = h.finalize();
-
-    let mut first_16 = [0u8; 16];
-    first_16.copy_from_slice(&digest[..16]);
-    let rand = u128::from_le_bytes(first_16);
-    Ok((rand % (total_remaining_tickets as u128)) as u64)
+    let modulus = remaining as u128;
+    let rejection_floor = modulus.wrapping_neg() % modulus;
+    for nonce in 0u32..=u32::MAX {
+        let mut h = Sha256::new();
+        h.update(RPD_DRAW_DOMAIN);
+        h.update(seed);
+        h.update((round as u64).to_le_bytes());
+        h.update(nonce.to_le_bytes());
+        let digest = h.finalize();
+        let mut first = [0u8; 16];
+        first.copy_from_slice(&digest[..16]);
+        let sample = u128::from_le_bytes(first);
+        if sample >= rejection_floor {
+            return Ok((sample % modulus) as u64);
+        }
+    }
+    Err(Error::WinnerSelectionFailed)
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        let _ = write!(&mut out, "{:02x}", byte);
+        let _ = write!(&mut out, "{byte:02x}");
     }
     out
-}
-
-#[derive(Clone)]
-struct WinnerEntry {
-    index: u64,
-    recipient: Pubkey,
-    amount: u64,
-}
-
-fn build_winners_merkle_tree(winners: &[WinnerEntry]) -> [u8; 32] {
-    if winners.is_empty() {
-        return [0; 32];
-    }
-
-    let mut leaves: Vec<[u8; 32]> = winners
-        .iter()
-        .map(|w| {
-            let mut data = Vec::new();
-            data.extend_from_slice(&w.index.to_le_bytes());
-            data.extend_from_slice(&w.recipient.to_bytes());
-            data.extend_from_slice(&w.amount.to_le_bytes());
-
-            let hash = Sha256::digest(&data);
-            let mut result = [0u8; 32];
-            result.copy_from_slice(&hash);
-            result
-        })
-        .collect();
-
-    while leaves.len() > 1 {
-        let mut next_level = Vec::new();
-        for chunk in leaves.chunks(2) {
-            let hash = if chunk.len() == 2 {
-                let mut data = Vec::new();
-                data.extend_from_slice(&chunk[0]);
-                data.extend_from_slice(&chunk[1]);
-                Sha256::digest(&data)
-            } else {
-                let mut data = Vec::new();
-                data.extend_from_slice(&chunk[0]);
-                data.extend_from_slice(&chunk[0]);
-                Sha256::digest(&data)
-            };
-            let mut result = [0u8; 32];
-            result.copy_from_slice(&hash);
-            next_level.push(result);
-        }
-        leaves = next_level;
-    }
-
-    leaves[0]
 }
 
 fn phase_name(phase: u8) -> &'static str {
@@ -687,91 +609,5 @@ fn phase_name(phase: u8) -> &'static str {
         FINALIZATION_PHASE_SELECTING => "selecting",
         FINALIZATION_PHASE_COMPLETED => "completed",
         _ => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use solana_program::account_info::AccountInfo;
-    use solana_program::pubkey::Pubkey;
-
-    #[test]
-    fn participant_commitment_depends_on_wallet_order() {
-        let wallet_a = Pubkey::new_unique();
-        let wallet_b = Pubkey::new_unique();
-
-        let ab = extend_participants_commitment(
-            extend_participants_commitment([0; 32], &wallet_a, 2),
-            &wallet_b,
-            3,
-        );
-        let ba = extend_participants_commitment(
-            extend_participants_commitment([0; 32], &wallet_b, 3),
-            &wallet_a,
-            2,
-        );
-
-        assert_ne!(ab, ba);
-    }
-
-    #[test]
-    fn seed_and_draw_are_deterministic() {
-        let seed = compute_seed_rpd_v3(42, 2, 5, [7; 32], [9; 32]);
-        assert_eq!(seed, compute_seed_rpd_v3(42, 2, 5, [7; 32], [9; 32]));
-        assert_eq!(
-            draw_index_rpd_v3(&seed, 0, 5).unwrap(),
-            draw_index_rpd_v3(&seed, 0, 5).unwrap()
-        );
-    }
-
-    #[test]
-    fn sorted_wallet_cursor_rejects_duplicates_and_rewind() {
-        let lottery = Pubkey::new_unique();
-        let mut ledger = FinalizationLedger::new(lottery, 4, 100);
-        let wallet_a = Pubkey::new_from_array([1; 32]);
-        let wallet_b = Pubkey::new_from_array([2; 32]);
-
-        require_sorted_wallet(&mut ledger, &wallet_a).unwrap();
-        require_sorted_wallet(&mut ledger, &wallet_b).unwrap();
-        assert!(require_sorted_wallet(&mut ledger, &wallet_b).is_err());
-        assert!(require_sorted_wallet(&mut ledger, &wallet_a).is_err());
-    }
-
-    #[test]
-    fn complete_finalization_rejects_zero_lamport_winners() {
-        let key = Pubkey::new_unique();
-        let owner = Pubkey::new_unique();
-        let mut lamports = 0u64;
-        let mut data = Vec::new();
-        let lottery_ai =
-            AccountInfo::new(&key, false, false, &mut lamports, &mut data, &owner, false);
-        let mut lottery = Lottery::new(
-            1,
-            Pubkey::new_unique(),
-            Pubkey::new_unique(),
-            100,
-            Pubkey::new_unique(),
-            255,
-            0,
-            1,
-        );
-        lottery.total_funds = 1;
-        lottery.participants_count = 3;
-        lottery.provider_uploaded_count = 3;
-        let mut ledger = FinalizationLedger::new(key, 2, 100);
-        ledger.total_eligible_tickets = 3;
-        ledger.target_winners = 2;
-        ledger
-            .push_winner(Pubkey::new_unique(), 1)
-            .expect("first winner");
-        ledger
-            .push_winner(Pubkey::new_unique(), 1)
-            .expect("second winner");
-
-        assert_eq!(
-            complete_finalization(&lottery_ai, &mut lottery, &mut ledger, 200),
-            Err(Error::InsufficientFunds.into())
-        );
     }
 }

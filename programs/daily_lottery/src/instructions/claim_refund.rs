@@ -46,7 +46,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     require_signer(wallet_ai)?;
 
     let _config: Config = read_account_data(config_ai)?;
-    let lottery: Lottery = read_account_data(lottery_ai)?;
+    let mut lottery: Lottery = read_account_data(lottery_ai)?;
     let _vault: Vault = read_account_data(vault_ai)?;
     let mut participant: Participant = read_account_data(participant_ai)?;
 
@@ -106,7 +106,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     }
 
     participant.mark_refund_claimed();
+    lottery.settlement_batches_completed = lottery
+        .settlement_batches_completed
+        .checked_add(1)
+        .ok_or(Error::MathOverflow)?;
     write_account_data(participant_ai, "Participant", &participant)?;
+    write_account_data(lottery_ai, "Lottery", &lottery)?;
 
     let timestamp = Clock::get()?.unix_timestamp;
     LotteryEvent::RefundClaimed {
